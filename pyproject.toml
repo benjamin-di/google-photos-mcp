@@ -1,6 +1,6 @@
 [project]
-name = "photos-mcp"
-version = "0.3.2"
+name = "google-photos-mcp"
+version = "0.3.3"
 description = "Read-only MCP server for one Google Photos library over the web app's private RPCs"
 readme = "README.md"
 license = "MIT"
@@ -50,7 +50,8 @@ build-backend = "hatchling.build"
 packages = ["src/photos_mcp"]
 
 [project.scripts]
-photos-mcp = "photos_mcp.server:main"
+google-photos-mcp = "photos_mcp.server:main"
+photos-mcp = "photos_mcp.server:main"  # the image's entrypoint and earlier docs
 photos-mcp-session = "photos_mcp.session_export:main"
 
 [tool.pytest.ini_options]

@@ -4,6 +4,6 @@ from importlib.metadata import PackageNotFoundError, version
 
 try:
     # Releases bump pyproject.toml only; read the installed distribution.
-    __version__ = version("photos-mcp")
+    __version__ = version("google-photos-mcp")
 except PackageNotFoundError:  # pragma: no cover - source tree without an install
     __version__ = "0+unknown"

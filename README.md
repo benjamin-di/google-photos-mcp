@@ -29,7 +29,7 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 1. **Install** (the `session` extra adds the browser exporter):
 
    ```sh
-   uv tool install "photos-mcp[session] @ git+https://github.com/benjamin-di/google-photos-mcp"
+   uv tool install "google-photos-mcp[session] @ git+https://github.com/benjamin-di/google-photos-mcp"
    photos-mcp-session browser install   # once: Playwright's Chromium (--with-deps also installs
                                         # its Linux system libraries, which needs root)
    ```
