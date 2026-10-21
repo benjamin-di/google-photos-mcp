@@ -1,0 +1,20 @@
+photos-mcp
+Copyright (c) 2026 benjamin-di. Licensed under the MIT licence (LICENSE).
+
+Based on vsmelov/google-photos-mcp (https://github.com/vsmelov/google-photos-mcp, branch
+claude/gphotos-mcp-server-readl5, commits 3663be9 and 82b55d8), used under the MIT licence
+with the permission of its author, vsmelov. The changes since then are this project's.
+
+Third-party code and data (full licence texts in THIRD_PARTY_NOTICES):
+
+- gpwc (Google Photos web client), https://github.com/xob0t/google_photos_web_client,
+  commit 651aa268d50529cb6128c8a42c9cd4ce668f2189. MIT License, Copyright (c) 2024
+  xob0t. A modified subset is vendored in src/photos_mcp/vendor/gpwc/ with its LICENCE;
+  the changes are listed in src/photos_mcp/vendor/gpwc/README.md. The response parsers in
+  src/photos_mcp/rpc.py also follow gpwc's parser.py.
+
+- Google-Photos-Toolkit (GPTK), https://github.com/xob0t/Google-Photos-Toolkit,
+  commit 6db9ab355e4797327e4078cf87a2b6994d36cf73. MIT License, Copyright (c) 2024 xob0t.
+  The RPC fixtures in tests/fixtures/*.json derive from its anonymised parser
+  fixtures (see tests/fixtures/README.md); field paths in src/photos_mcp/rpc.py and
+  docs/PAYLOADS.md follow its parser.

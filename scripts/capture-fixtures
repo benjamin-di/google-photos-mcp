@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Record anonymised Google responses for tests/fixtures/recorded/ (see photos_mcp.capture).
+
+Run it where photos-mcp runs, against the live read-only snapshot, never on a dev box:
+    docker exec photos-mcp python -m photos_mcp.capture /state/recorded [--query beach]
+This script is the same entry point as ``python -m photos_mcp.capture``; it is not in the
+image, and a checkout must never be pointed at the live session (AGENTS.md). Copy the
+output out, review it, then delete /state/recorded in the container.
+"""
+
+from photos_mcp.capture import main
+
+raise SystemExit(main())

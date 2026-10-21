@@ -1,0 +1,70 @@
+[project]
+name = "photos-mcp"
+version = "0.3.1"
+description = "Read-only MCP server for one Google Photos library over the web app's private RPCs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]
+requires-python = ">=3.12"
+dependencies = [
+    # FastMCP 4 (MCP SDK 2): stateless JSON over streamable HTTP, or stdio.
+    "fastmcp==4.0.10",
+    # Chrome TLS/HTTP2 fingerprint for photos.google.com. Its chromeN profiles must stay
+    # within 4 majors of the session's Chrome (drift guard in tests/test_curl_sender.py).
+    "curl-cffi==0.16.3",
+    # Thumbnail re-encoding and contact sheets.
+    "pillow>=12.0",
+    # PHOTOS_BUDGET_TZ on images without a system time zone database.
+    "tzdata>=2025.2",
+]
+
+[project.urls]
+Repository = "https://github.com/benjamin-di/google-photos-mcp"
+Issues = "https://github.com/benjamin-di/google-photos-mcp/issues"
+
+[project.optional-dependencies]
+# photos-mcp-session browser: sign in once in a dedicated browser profile, export snapshots.
+session = ["playwright>=1.55"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.14"]
+
+[tool.uv]
+# Security floors for transitive dependencies.
+constraint-dependencies = [
+    "starlette>=1.3.1,<2",
+    "cryptography>=50.0.0",
+    "joserfc>=1.6.8",
+    "idna>=3.15",
+    "pydantic-settings>=2.14.2",
+    "pyjwt>=2.13.0",
+    "python-multipart>=0.0.31",
+    "authlib>=1.7.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/photos_mcp"]
+
+[project.scripts]
+photos-mcp = "photos_mcp.server:main"
+photos-mcp-session = "photos_mcp.session_export:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["SIM105"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["photos_mcp"]

@@ -1,0 +1,17 @@
+# Netscape HTTP Cookie File
+# Sample session snapshot (fake values only).
+.google.com	TRUE	/	TRUE	1830000000	SID	fake-sid-value
+.google.com	TRUE	/	TRUE	1830000000	HSID	fake-hsid-value
+.google.com	TRUE	/	TRUE	1830000000	SSID	fake-ssid-value
+.google.com	TRUE	/	TRUE	1830000000	APISID	fake-apisid-value
+.google.com	TRUE	/	TRUE	1830000000	SAPISID	fake-sapisid-value
+#HttpOnly_.google.com	TRUE	/	TRUE	1830000000	__Secure-1PSID	fake-1psid-value
+#HttpOnly_.google.com	TRUE	/	TRUE	1830000000	__Secure-3PSID	fake-3psid-value
+.google.com	TRUE	/	TRUE	1830000000	__Secure-1PSIDTS	fake-1psidts-value
+.google.com	TRUE	/	TRUE	1830000000	__Secure-1PAPISID	fake-1papisid-value
+.google.com	TRUE	/	TRUE	1830000000	SIDCC	fake-sidcc-value
+.google.com	TRUE	/	TRUE	1830000000	NID	fake-nid-value
+#HttpOnly_photos.google.com	FALSE	/	TRUE	1830000000	OSID	fake-photos-osid
+#HttpOnly_photos.google.com	FALSE	/	TRUE	1830000000	__Secure-OSID	fake-photos-secure-osid
+#HttpOnly_photos.fife.usercontent.google.com	FALSE	/	TRUE	1830000000	OSID	fake-fife-osid
+#HttpOnly_photos.fife.usercontent.google.com	FALSE	/	TRUE	1830000000	__Secure-OSID	fake-fife-secure-osid
