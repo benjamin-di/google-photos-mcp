@@ -1,6 +1,6 @@
 [project]
 name = "photos-mcp"
-version = "0.3.1"
+version = "0.3.2"
 description = "Read-only MCP server for one Google Photos library over the web app's private RPCs"
 readme = "README.md"
 license = "MIT"

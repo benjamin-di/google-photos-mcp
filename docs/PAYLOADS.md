@@ -115,7 +115,7 @@ item is skipped and no extra POST is normally needed.
 | `location.lat`, `location.lng` | `[0][9][0]` or `[0][13][0]` — a pair of E7 integers (`407696000, -739964000` in the fixture = 40.7696, −73.9964, the album is titled "ny"). We divide by 1e7. Neither upstream converts; GPTK types them as plain numbers. |
 | `location.name` | `[0][13][2][0][1][0][0]` |
 | `albums[]` | `[0][19]` list of album records, same layout as `Z5xsfc` albums (`albumParse`) → `album_key`, `title`, `item_count` |
-| `camera` | `[0][23]` — GPTK exposes it as `cameraInfo: unknown`; gpwc as `camera_info: str | int | None`. It is `null` in the only recorded fixture (a video), so its internal layout is **not documented anywhere we read**. We pass the raw value through unchanged and say so in the README. |
+| `camera` | `[0][23]` — GPTK exposes it as `cameraInfo: unknown`; gpwc as `camera_info: str | int | None`. It is `null` in the only recorded fixture (a video), so its internal layout is **not documented anywhere we read**. photos-mcp returns its readable strings (at most 6 of ≤ 80 chars, deduplicated) joined by spaces, or null (`client._camera`). |
 | `source` | `[0][27][0]` mapped `1 mobile, 2 web, 3 shared, 4 partnerShared, 7 drive, 8 pc, 11 gmail`; `[0][27][1][2]` mapped `1 android, 3 ios` (`parser.ts` L240-257) |
 | `takes_up_space`, `space_used_bytes`, `is_original_quality` | `[0][30][0] == 1`, `[0][30][1]`, `[0][30][2] == 2` |
 

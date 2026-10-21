@@ -331,7 +331,8 @@ paging, thumbnails), `transport.py` (HTTP policy), `session.py` (snapshot reader
 (request framing, read payloads). `docs/PAYLOADS.md` maps every RPC and field path to its
 source.
 
-Report security problems privately as described in `SECURITY.md`, not in public issues.
+Contributions: see `CONTRIBUTING.md`. Report security problems privately as described in
+`SECURITY.md`, not in public issues.
 
 ## Licence and provenance
 
