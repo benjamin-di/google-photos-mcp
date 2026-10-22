@@ -14,9 +14,9 @@ itself uses, with the cookies of a signed-in browser.
 > session snapshot it reads carries **full authority over that Google account**; keep it
 > private (the tools create it 0600 in a 0700 directory).
 
-The repository is `google-photos-mcp`; the Python package and its commands are
-`photos-mcp` and `photos-mcp-session`. It is not on PyPI: install it from GitHub. It is
-developed and tested on Linux (Python 3.12+).
+The repository and the PyPI package are [`google-photos-mcp`](https://pypi.org/project/google-photos-mcp/); its
+commands are `google-photos-mcp` (also installed as `photos-mcp`) and `photos-mcp-session`. It is developed and tested
+on Linux (Python 3.12+).
 
 ```
 your browser profile ──photos-mcp-session──▶ session dir {cookies.txt, meta.json}
@@ -29,7 +29,7 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 1. **Install** (the `session` extra adds the browser exporter):
 
    ```sh
-   uv tool install "google-photos-mcp[session] @ git+https://github.com/benjamin-di/google-photos-mcp"
+   uv tool install "google-photos-mcp[session]"
    photos-mcp-session browser install   # once: Playwright's Chromium (--with-deps also installs
                                         # its Linux system libraries, which needs root)
    ```
