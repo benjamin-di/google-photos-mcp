@@ -1,8 +1,10 @@
 # photos-mcp
 
-Read-only [MCP](https://modelcontextprotocol.io) server for Google Photos libraries. An
-assistant can **find** photos with Google Photos' own search (people, places, things, text
-in images, dates) and **look at** them, and nothing more: there is no write path. It serves
+[MCP](https://modelcontextprotocol.io) server for Google Photos libraries. An assistant can
+**find** photos with Google Photos' own search (people, places, things, text in images,
+dates), **look at** them, show them to the person as a gallery, and **organise albums**
+(create one, add photos, take them out again after the person confirms). It never deletes,
+archives, edits or shares a photo ([Safety](#safety-and-google-posture)). It serves
 one library, or one per person behind an authenticating proxy ([Accounts](#accounts)), where
 each person connects their own Google account through a sign-in link
 ([Signing in with a link](#signing-in-with-a-link)).
@@ -134,9 +136,10 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 
 ## Tools
 
-All are read-only (`readOnlyHint`) except `photos_connect`, which makes a sign-in link and
-exists only where sign-in links are configured; all but `photos_status` and `photos_connect`
-are `openWorldHint`.
+All are read-only (`readOnlyHint`) except the album changes (`photos_album_create`,
+`photos_album_add`, and `photos_album_remove`, the only `destructiveHint` one) and
+`photos_connect`, which makes a sign-in link and exists only where sign-in links are
+configured; all but `photos_status` and `photos_connect` are `openWorldHint`.
 Arguments that fail the schema come back as the typed `invalid_argument` error naming the
 argument, never pydantic's raw text.
 
@@ -147,6 +150,9 @@ argument, never pydantic's raw text.
 | `photos_albums` | `limit`, `cursor` | `{id, url, title, count}`, plus `shared: true` for shared albums |
 | `photos_get` | `ids` ≤10 (one batchexecute for all) | the item shape plus `uploaded_at` (UTC), lat/lon, camera, original width/height, size, duration, albums, `source`, `original_quality` |
 | `photos_on_this_day` | `date` (today), `years` 1–20 (10), `per_year` 1–20 (6) | `{date, years: [{year, items, more}], years_checked}` |
+| `photos_album_create` | `title` (≤200), `ids` ≤50 | the new album `{id, url, title, count, shared}`, `added` |
+| `photos_album_add` | `album_id`, `ids` ≤50 (from search or list) | the album afterwards, `requested`, `added` (from its counts) |
+| `photos_album_remove` | `album_id`, `ids` ≤50 (as the album's own listing gives them), `confirm` | without `confirm`: a preview (`remove`, `not_in_album`, `confirm_token`, `expires_at`) and no change; with it: the album afterwards and `removed` |
 | `photos_show` | `items` ≤12 `{id, note}`, `title` | a gallery card for the person ([Photo cards](#photo-cards)); the same data as JSON for other clients |
 | `photos_contact_sheet` | `ids` ≤24 | legend `n → id, date` + one JPEG grid ≤1568 px, numbered tiles, video badge |
 | `photos_view` | `ids` ≤4, `max_px` 256–1568 (1024) | per id a label block (width/height of the returned JPEG) + a JPEG block (videos: poster frame) |
@@ -240,6 +246,9 @@ Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable
 | `account_not_connected` | the proxy named an account that is not configured, named none, or another bearer named one | the operator adds the account; never served from another account |
 | `connect_unavailable` | `photos_connect` for the default account (its session is the operator's) | as named |
 | `connect_limited` | more than 6 links an hour for one account | give the newest link |
+| `outcome_unknown` | an album change failed after it was sent (5xx or network): it is never repeated | read the album to see what happened |
+| `refused` | Google refused an album change (an album this account cannot edit) | nothing changed |
+| `confirm_invalid` | a removal's token is unknown, expired, used, or for other arguments | preview again and ask the person |
 
 ## Liveness
 
@@ -252,10 +261,21 @@ the same generation.
 
 ## Safety and Google posture
 
-- **No write path.** Only the read builders of gpwc are vendored; the transport refuses
-  any RPC id outside `lcxiM EzkLib EWgK9e Z5xsfc snAcKc VrseUb fDcn4b EzwWhf`;
-  `tests/test_safety.py` checks the source for other RPC ids, write builders, other
-  hosts and other HTTP libraries.
+- **Album changes only.** Reads go through `GoogleTransport.rpc`, which refuses any RPC
+  id outside `lcxiM EzkLib EWgK9e Z5xsfc snAcKc VrseUb fDcn4b EzwWhf`. Changes go through
+  `GoogleTransport.write`, which refuses any outside `OXvT9d E1Cajb laUYf ycV3Nd LjmOue`
+  (create an album; add items to an album or a shared one; remove items from an album or a
+  shared one) and never retries a request that may have reached Google (`outcome_unknown`,
+  logged). No builder exists for deleting, trashing, archiving, favouriting, editing dates,
+  places or descriptions, sharing, the locked folder or downloads; `tests/test_safety.py`
+  checks the source for other RPC ids and builders, other hosts and other HTTP libraries.
+- **Removing is confirmed.** `photos_album_remove` first finds the ids in the album's own
+  listing (Google's remove RPC names no album, so a key from another album would act there)
+  and returns a preview and a single-use token, valid 10 minutes, for exactly that album and
+  those ids; only that token removes them. Every change is read back from the album
+  (`added` / `removed` from its counts), counts against `PHOTOS_DAILY_WRITE_BUDGET` (each
+  account's own, 500 a day) and is appended to `audit.jsonl` in the account's state directory
+  (ids and counts only).
 - **Hosts:** HTTPS only, `photos.google.com`, `photos.fife.usercontent.google.com`,
   `lh[0-9].googleusercontent.com`. Redirects are followed by hand, at most 3, inside
   that list; sign-in, consent and `/sorry` redirects are classified, never followed.
@@ -331,6 +351,7 @@ flows back from photos-mcp to it.
 | `PHOTOS_STATE_DIR` | `/state` | `state.json` (budgets, breaker, dead generation, last error) and `cache/` |
 | `PHOTOS_DAILY_RPC_BUDGET` | 3000 | RPCs plus app-page loads per day |
 | `PHOTOS_DAILY_THUMB_BUDGET` | 2000 | image fetches per day (cache hits are free) |
+| `PHOTOS_DAILY_WRITE_BUDGET` | 500 | album changes per account and day (items added or removed, albums created) |
 | `PHOTOS_BUDGET_TZ` | `UTC` | IANA time zone whose midnight resets the budgets |
 | `PHOTOS_CACHE_MAX_BYTES` | 2 GiB | thumbnail cache, LRU; 0 disables it |
 | `LOG_LEVEL` | `INFO` | photos-mcp's own log lines, JSON on stderr; FastMCP's startup lines and, over HTTP, the web server's access lines (with client addresses) are plain text |

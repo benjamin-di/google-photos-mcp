@@ -59,6 +59,11 @@ READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, 
 LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 # photos_connect makes a link (state on this server), and changes nothing at Google.
 LINK = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+# Album changes: creating one is not idempotent; adding is (Google keeps one copy); removing is destructive.
+CREATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+ADD = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+REMOVE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+Ids50 = Annotated[list[str], Field(min_length=1, max_length=50, description="Item ids (max 50)")]
 
 HTTP_OPTIONS: dict[str, Any] = {
     "stateless_http": True,
@@ -94,8 +99,9 @@ class Pick(BaseModel):
 _ERRORS = "\n".join(f"- {code}: {text}" for code, text in NEXT_STEP.items())
 
 INSTRUCTIONS = f"""\
-Read-only access to one Google Photos library (the calling person's own account), through the
-same private web API photos.google.com uses. Nothing here can change the library.
+Google Photos for the calling person's own account, through the same private web API
+photos.google.com uses: find and look at photos and videos, and organise albums. Nothing here
+deletes, archives, edits or shares photos.
 
 Flow: photos_search -> photos_contact_sheet -> photos_view, then photos_show for the person.
 1. photos_search(query) uses Google's own search: people (a name the library has
@@ -121,6 +127,14 @@ place (Google's search response has none): pass details=true (adds place, lat, l
 camera; limit up to 20) or use photos_get. photos_get adds uploaded_at (UTC), lat/lon,
 camera, width/height, size_bytes, duration_s, albums, source (how it reached the library:
 mobile, web, shared, partnerShared, drive, pc, gmail; android, ios) and original_quality.
+
+Albums: photos_album_create(title, ids) makes an album (with up to 50 items);
+photos_album_add(album_id, ids) adds up to 50 items (ids from search or list); photos_album_remove
+takes them out again (they stay in the library) and needs the person's yes: call it first without
+confirm, show the person the preview (album, photos to remove), and only after their explicit yes
+call it again with the same arguments and confirm set to the preview's confirm_token. Its ids are
+the ones photos_list(source=album) gives for that album. Each change is read back from the album
+(added / removed counts) and counts against a daily write budget (photos_status: budgets).
 
 Images: at most 1568 px on the longest edge; originals and downloads are not available here
 (the person opens an item's url to download it).
@@ -211,6 +225,7 @@ class Accounts:
             rpc_budget=account.rpc_budget,
             thumb_budget=account.thumb_budget,
             budget_tz=settings.budget_tz,
+            write_budget=settings.daily_write_budget,
         )
         transport = GoogleTransport(
             SessionReader(settings.session_dir),
@@ -260,6 +275,7 @@ class Accounts:
             thumb_budget=account.thumb_budget,
             budget_tz=settings.budget_tz,
             breaker=self.default.state,
+            write_budget=settings.daily_write_budget,
         )
         transport = GoogleTransport(
             SessionReader(account.session_dir, missing_code="not_signed_in"),
@@ -498,6 +514,45 @@ def create_server(
 
         shown, view = await call(run)
         return ToolResult(structured_content=shown, meta={VIEW_META: view})
+
+    @mcp.tool(annotations=CREATE)
+    async def photos_album_create(
+        title: Annotated[str, Field(min_length=1, max_length=200, description="The new album's title")],
+        ids: Annotated[
+            list[str] | None, Field(max_length=50, description="Items to put in it (max 50), ids from search or list")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Create an album, with up to 50 items in it. Returns the album {id, url, title, count,
+        shared} and how many items it holds. Do not repeat a call that failed with outcome_unknown:
+        photos_albums shows whether the album exists."""
+        return await call(PhotosService.album_create, title, ids)
+
+    @mcp.tool(annotations=ADD)
+    async def photos_album_add(
+        album_id: Annotated[str, Field(min_length=8, max_length=128, description="An album id from photos_albums")],
+        ids: Ids50,
+    ) -> dict[str, Any]:
+        """Add up to 50 items (ids from search or list) to an album, also a shared one this account may
+        add to. Items already in it stay once. Returns the album as Google shows it afterwards and
+        added (from its counts before and after)."""
+        return await call(PhotosService.album_add, album_id, ids)
+
+    @mcp.tool(annotations=REMOVE)
+    async def photos_album_remove(
+        album_id: Annotated[str, Field(min_length=8, max_length=128, description="An album id from photos_albums")],
+        ids: Annotated[
+            list[str],
+            Field(min_length=1, max_length=50, description="Item ids as photos_list(source=album) gives them (max 50)"),
+        ],
+        confirm: Annotated[
+            str | None, Field(max_length=64, description="The preview's confirm_token, after the person said yes")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Take up to 50 items out of an album; they stay in the library. Without confirm: a preview
+        (the album, the items found in it, not_in_album, confirm_token for 10 minutes) and nothing
+        changes. Show it to the person and wait for their explicit yes, then call again with the
+        same album_id and ids and confirm. Returns the album afterwards and removed."""
+        return await call(PhotosService.album_remove, album_id, ids, confirm)
 
     @mcp.tool(annotations=LOCAL)
     async def photos_status() -> dict[str, Any]:

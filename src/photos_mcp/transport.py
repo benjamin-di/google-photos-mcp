@@ -14,7 +14,9 @@
 * Liveness: only a redirect to accounts.google.com or google.com/photos/about, or an
   account mismatch, marks a generation dead; a bare 401 and a consent redirect are
   reported, not dead; anything else unproven is ``upstream_error``.
-* RPC id allowlist and host allowlist (HTTPS only). Redirects are followed by hand, at most
+* RPC id allowlists and host allowlist (HTTPS only): ``rpc`` sends only the read RPCs; ``write``
+  sends only the album changes in ``WRITE_RPC_ALLOWLIST`` and never retries a request that may have
+  reached Google (``outcome_unknown``). Redirects are followed by hand, at most
   3, and only within the allowlist; a redirect elsewhere is classified, never followed.
 * Streamed body caps: 8 MiB per RPC or page, 15 MiB per image.
 * Daily budgets and the persisted breaker (``state.StateStore``).
@@ -47,6 +49,9 @@ from .vendor.gpwc.payloads import Payload
 log = logging.getLogger(__name__)
 
 RPC_ALLOWLIST = frozenset({"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf"})
+# Album changes only: create an album (OXvT9d), add items to an album (E1Cajb) or a shared album (laUYf), remove items
+# from an album (ycV3Nd) or a shared album (LjmOue). Nothing here deletes, trashes, archives, edits or shares media.
+WRITE_RPC_ALLOWLIST = frozenset({"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue"})
 PAGE_HOST = "photos.google.com"
 IMAGE_HOSTS = re.compile(r"^(photos\.fife\.usercontent\.google\.com|lh[0-9]\.googleusercontent\.com)$")
 PHOTOS_URL = "https://photos.google.com/"
@@ -392,6 +397,27 @@ class GoogleTransport:
                     raise self._fail(ctx, "stale_token", f"HTTP {response.status} twice")
             return self._parse_rpc(ctx, response, payloads)
 
+    def write(self, payloads: Sequence[Payload]) -> list[RpcResult]:
+        """One batchexecute POST of album changes. A 400/403 (Google refused it, nothing applied) is retried once
+        with fresh page globals, as for reads; a 5xx or a network failure is never retried: the change may have
+        reached Google, so it is ``outcome_unknown`` and the caller reads back what happened."""
+        payloads = list(payloads)
+        rpcids = [p.rpcid for p in payloads]
+        if not payloads or any(r not in WRITE_RPC_ALLOWLIST for r in rpcids):
+            raise RuntimeError("RPC id not on the write allowlist")
+        with self.pacer.slot():
+            ctx = self._context()
+            self._ensure_globals(ctx)
+            response = self._post(ctx, payloads, retries=0, unknown="outcome_unknown")
+            if response.status in (400, 403):
+                self._event("stale_token", rpcids=",".join(rpcids), status=response.status)
+                ctx.client = None
+                self._ensure_globals(ctx)
+                response = self._post(ctx, payloads, retries=0, unknown="outcome_unknown")
+                if response.status in (400, 403):
+                    raise PhotosError("refused", log_detail=f"write HTTP {response.status} twice")
+            return self._parse_rpc(ctx, response, payloads)
+
     def fetch_image(self, url: str) -> bytes:
         """GET one thumbnail on the image CDN. Item-level failures don't affect the session."""
         if not host_allowed(url) or not IMAGE_HOSTS.match((urlsplit(url).hostname or "").lower()):
@@ -501,12 +527,16 @@ class GoogleTransport:
 
     # -- HTTP ---------------------------------------------------------------------------
 
-    def _post(self, ctx: _Context, payloads: Sequence[Payload]) -> HttpResponse:
+    def _post(
+        self, ctx: _Context, payloads: Sequence[Payload], *, retries: int = MAX_RETRIES, unknown: str = "upstream_error"
+    ) -> HttpResponse:
         assert ctx.client is not None
         self.state.take("rpc", len(payloads))
         url, params, body = ctx.client.build_request(payloads)
         rpcids = ",".join(p.rpcid for p in payloads)
-        response = self._send(ctx, "POST", url, params=params, data=body, kind="rpc", label=rpcids)
+        response = self._send(
+            ctx, "POST", url, params=params, data=body, kind="rpc", label=rpcids, retries=retries, unknown=unknown
+        )
         if 300 <= response.status < 400:
             location = urljoin(url, response.headers.get("location", ""))
             code = _redirect_code(location)
@@ -559,8 +589,11 @@ class GoogleTransport:
         data: str | None = None,
         max_bytes: int = RPC_MAX_BYTES,
         cookies: bool = True,
+        retries: int = MAX_RETRIES,
+        unknown: str = "upstream_error",
     ) -> HttpResponse:
-        """One logical request: host check, pacing, ≤2 retries on 5xx/network, cookie merge."""
+        """One logical request: host check, pacing, ≤``retries`` retries on 5xx/network, cookie merge. After the
+        last attempt a 5xx or network failure is ``unknown`` (``outcome_unknown`` for a change)."""
         if not host_allowed(url):
             raise PhotosError("upstream_error", log_detail="request to a host outside the allowlist")
         parts = urlsplit(url)
@@ -587,11 +620,11 @@ class GoogleTransport:
             except NetworkError as exc:
                 pacer.done()
                 self._event("http", kind=kind, rpcids=label, host=host, status=f"network:{exc}", ms=_ms(started))
-                if attempt < MAX_RETRIES:
+                if attempt < retries:
                     attempt += 1
                     pacer.backoff(attempt - 1)
                     continue
-                raise PhotosError("upstream_error", log_detail="network error after retries") from None
+                raise PhotosError(unknown, log_detail="network error after retries") from None
             pacer.done()
             self._event(
                 "http", kind=kind, rpcids=label, host=host, status=response.status, bytes=len(response.body),
@@ -600,12 +633,12 @@ class GoogleTransport:
             if response.set_cookies and cookies:
                 with self._cookie_lock:
                     ctx.cookies.merge_set_cookie(host, response.set_cookies, self._clock())
-            if response.status >= 500 and attempt < MAX_RETRIES:
+            if response.status >= 500 and attempt < retries:
                 attempt += 1
                 pacer.backoff(attempt - 1)
                 continue
             if response.status >= 500:
-                raise PhotosError("upstream_error", log_detail=f"HTTP {response.status} after retries")
+                raise PhotosError(unknown, log_detail=f"HTTP {response.status} after retries")
             return response
 
     # -- parsing ------------------------------------------------------------------------

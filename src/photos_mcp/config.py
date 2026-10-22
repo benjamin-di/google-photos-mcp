@@ -27,6 +27,7 @@ class Settings:
     state_dir: Path = Path("/state")
     daily_rpc_budget: int = 3000
     daily_thumb_budget: int = 2000
+    daily_write_budget: int = 500  # album changes per account and day (each account's own)
     cache_max_bytes: int = 2 * 1024**3
     budget_tz: tzinfo = field(default=UTC)
     # Accounts (README "Accounts"): the default one is the snapshot in session_dir; further ones live in
@@ -60,6 +61,7 @@ class Settings:
             state_dir=Path((env.get("PHOTOS_STATE_DIR") or "").strip() or "/state"),
             daily_rpc_budget=_int(env, "PHOTOS_DAILY_RPC_BUDGET", 3000, 0, 100_000),
             daily_thumb_budget=_int(env, "PHOTOS_DAILY_THUMB_BUDGET", 2000, 0, 100_000),
+            daily_write_budget=_int(env, "PHOTOS_DAILY_WRITE_BUDGET", 500, 0, 100_000),
             cache_max_bytes=_int(env, "PHOTOS_CACHE_MAX_BYTES", 2 * 1024**3, 0, 1024**4),
             budget_tz=_zone(env, "PHOTOS_BUDGET_TZ"),
             default_account=_account(env),

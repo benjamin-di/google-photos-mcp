@@ -1,7 +1,7 @@
 [project]
 name = "google-photos-mcp"
-version = "0.5.0"
-description = "Read-only MCP server for Google Photos libraries over the web app's private RPCs"
+version = "0.6.1"
+description = "MCP server for Google Photos libraries (search, view, albums) over the web app's private RPCs"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]

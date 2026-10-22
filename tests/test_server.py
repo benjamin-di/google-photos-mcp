@@ -24,7 +24,11 @@ TOOLS = {
     "photos_canary",
     "photos_on_this_day",
     "photos_show",
+    "photos_album_create",
+    "photos_album_add",
+    "photos_album_remove",
 }
+ALBUM_TOOLS = {"photos_album_create", "photos_album_add", "photos_album_remove"}
 
 
 def run(coro):
@@ -45,8 +49,9 @@ def test_tool_surface_and_annotations(service):
     tools = run(_list(create_server(service)))
     assert {tool.name for tool in tools} == TOOLS
     for tool in tools:
-        assert tool.annotations.read_only_hint is True, tool.name
-        assert tool.annotations.destructive_hint is False, tool.name
+        # Only the album tools change anything; only removing is destructive.
+        assert tool.annotations.read_only_hint is (tool.name not in ALBUM_TOOLS), tool.name
+        assert tool.annotations.destructive_hint is (tool.name == "photos_album_remove"), tool.name
         assert tool.annotations.open_world_hint is (tool.name != "photos_status"), tool.name
 
 
@@ -85,7 +90,7 @@ def test_contact_sheet_returns_legend_then_jpeg(service):
 def test_status_tool(service):
     result = run(_call(create_server(service), "photos_status", {}))
     body = json.loads(result.content[0].text)
-    assert body["session"]["state"] == "ok" and body["read_only"] is True
+    assert body["session"]["state"] == "ok" and body["changes"] == ["albums"]
 
 
 def test_typed_error_payload(service, transport):

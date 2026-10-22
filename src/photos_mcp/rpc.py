@@ -266,6 +266,8 @@ def parse_album_page(data: Any) -> RawAlbumPage:
         album_key=_str(field(meta, 0)),
         title=_str(field(meta, 1)),
         item_count=_int(field(meta, 21)),
+        # Not a sign of sharing: live, a private album's page has members and an auth key too. Whether an album
+        # is shared comes from the albums list (``parse_album_record``).
         auth_key=_str(field(meta, 19)),
     )
 

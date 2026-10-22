@@ -11,7 +11,7 @@ make check       # ruff, format, lock consistency, tests (offline)
 ```
 
 [AGENTS.md](AGENTS.md) has the rules: tests never reach Google, `tests/test_safety.py` is the
-read-only boundary, the session snapshot format stays backward compatible, and nothing from a
+boundary of what it may change (album changes only), the session snapshot format stays backward compatible, and nothing from a
 real photo library or account goes into code, docs or fixtures (recorded fixtures pass the
 capture anonymiser and `tests/test_fixture_privacy.py`). Never point a development run at a
 real account's session.

@@ -41,12 +41,15 @@ class StateStore:
         budget_tz: tzinfo = UTC,
         clock: Callable[[], float] = time.time,
         breaker: StateStore | None = None,
+        write_budget: int = 500,
     ) -> None:
         self.path = Path(state_dir) / "state.json"
         # Another store that owns the breaker (the default account's), or None: this one does.
         self._breaker_store = breaker
         self.rpc_budget = rpc_budget
         self.thumb_budget = thumb_budget
+        # Album changes a day (items added or removed, albums created): each account's own, never split.
+        self.write_budget = write_budget
         # Daily budgets reset at midnight in this zone (PHOTOS_BUDGET_TZ).
         self.budget_tz = budget_tz
         self._clock = clock
@@ -97,7 +100,7 @@ class StateStore:
         budget = self._data.get("budget")
         today = self._today()
         if not isinstance(budget, dict) or budget.get("day") != today:
-            budget = {"day": today, "rpc": 0, "thumb": 0}
+            budget = {"day": today, "rpc": 0, "thumb": 0, "write": 0}
             self._data["budget"] = budget
         return budget
 
@@ -107,8 +110,8 @@ class StateStore:
             self.rpc_budget, self.thumb_budget = rpc_budget, thumb_budget
 
     def take(self, kind: str, count: int = 1) -> None:
-        """Spend ``count`` units of the ``rpc`` or ``thumb`` budget, or raise budget_exhausted."""
-        limit = self.rpc_budget if kind == "rpc" else self.thumb_budget
+        """Spend ``count`` units of the ``rpc``, ``thumb`` or ``write`` budget, or raise budget_exhausted."""
+        limit = {"rpc": self.rpc_budget, "thumb": self.thumb_budget, "write": self.write_budget}[kind]
         with self._lock:
             budget = self._budget()
             used = int(budget.get(kind) or 0)
@@ -162,6 +165,16 @@ class StateStore:
 
     # -- last error ---------------------------------------------------------------------
 
+    def audit(self, entry: dict[str, Any]) -> None:
+        """One line per album change in ``audit.jsonl`` beside state.json (ids and counts, never content)."""
+        line = json.dumps({"at": _iso(self._clock()), **entry}, separators=(",", ":"))
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path.parent / "audit.jsonl", "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError as exc:
+            log.error("could not append to audit.jsonl (%s)", type(exc).__name__)
+
     def record_error(self, code: str) -> None:
         with self._lock:
             self._data["last_error"] = {"code": code, "at": self._clock()}
@@ -197,6 +210,8 @@ class StateStore:
                     "rpc_daily": self.rpc_budget,
                     "thumb_left": max(0, self.thumb_budget - int(budget.get("thumb") or 0)),
                     "thumb_daily": self.thumb_budget,
+                    "write_left": max(0, self.write_budget - int(budget.get("write") or 0)),
+                    "write_daily": self.write_budget,
                 },
                 "last_error": {"code": last.get("code"), "at": _iso(last.get("at"))} if last else None,
                 "dead_generation": dead.get("generation"),

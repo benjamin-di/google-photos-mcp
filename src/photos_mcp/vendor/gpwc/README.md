@@ -26,3 +26,8 @@ Modifications for photos-mcp (2026-10-14):
   `parse_response` / `execute` helpers; photos-mcp parses responses in `photos_mcp.rpc`.
 - **Payload ids** follow the web app: `"generic"` for a single RPC, `"1"`, `"2"`, ... in
   a batch (upstream used random hex ids).
+
+Album changes (photos-mcp 0.6): `album_payloads.py` holds the only write builders, from the same gpwc commit
+(`CreateAlbum` `OXvT9d`, `AddItemsToExistingAlbum` `E1Cajb`, `AddItemsToExistingSharedAlbum` `laUYf`,
+`RemoveItemsFromAlbum` `ycV3Nd`) and Google-Photos-Toolkit's `removeItemsFromSharedAlbum` (`LjmOue`). The transport
+sends them only through `GoogleTransport.write`, whose allowlist is exactly these five RPC ids.

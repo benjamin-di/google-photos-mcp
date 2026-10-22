@@ -1,5 +1,6 @@
-"""Static guard over the shipped source: nothing can write to the library, talk to another
-host, or echo exception text. A new RPC, host or builder must be a deliberate change here."""
+"""Static guard over the shipped source: the only changes it can make are album changes (create, add, remove),
+it talks to no other host, and echoes no exception text. A new RPC, host or builder must be a deliberate change
+here."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ import re
 from pathlib import Path
 
 from photos_mcp import transport
-from photos_mcp.vendor.gpwc import payloads
+from photos_mcp.vendor.gpwc import album_payloads, payloads
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "photos_mcp"
 FILES = sorted(SRC.rglob("*.py"))
@@ -16,19 +17,26 @@ SOURCE = {path: path.read_text() for path in FILES}
 ALL = "\n".join(SOURCE.values())
 
 READ_RPCS = {"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf"}
-# Every other RPC id gpwc 651aa268 knows (trash, archive, favourites, albums, sharing,
-# geo/description/timestamp edits, downloads, uploads, partner sharing, Drive import).
+# Album changes only: create, add, add to a shared album, remove, remove from a shared album.
+WRITE_RPCS = {"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue"}
+# Every other RPC id gpwc 651aa268 and Google-Photos-Toolkit know (trash, archive, favourites, sharing,
+# geo/description/timestamp edits, downloads, uploads, partner sharing, Drive import, locked folder, reorder).
 OTHER_GPWC_RPCS = {
-    "AQNOFd", "DaSgWe", "dnv2s", "E1Cajb", "e9T5je", "Es7fke", "EtUHOe", "F2A0H", "Ftfh0", "laUYf",
-    "OXvT9d", "pLFTfd", "SusGud", "swbisb", "TLvKMb", "V8RKJ", "w7TP3c", "XwAOJf", "yCLA7", "ycV3Nd",
-    "zy0IHe",
+    "AQNOFd", "DaSgWe", "dnv2s", "e9T5je", "Es7fke", "EtUHOe", "F2A0H", "Ftfh0", "pLFTfd", "SusGud",
+    "swbisb", "TLvKMb", "V8RKJ", "w7TP3c", "XwAOJf", "yCLA7", "zy0IHe", "nMFwOc", "StLnCe", "Pp2Xxe",
+    "QD9nKf",
 }  # fmt: skip
+# Builders that must never exist: every change but the album ones, and the reads photos-mcp does not do.
 WRITE_BUILDERS = {
-    "MoveToTrash", "RestoreFromTrash", "CreateAlbum", "SetFavorite", "UnFavorite", "SetArchive", "UnArchive",
-    "SetItemTimestamp", "SetItemDescription", "SetItemGeoData", "DeleteItemGeoData", "RemoveItemsFromAlbum",
-    "AddItemsToNewAlbum", "AddItemsToExistingAlbum", "AddItemsToExistingSharedAlbum", "GetDownloadToken",
-    "CheckDownloadToken", "SaveSharedMediaToLibrary", "SavePartnerSharedMedia", "GetUnsupportedVideoDownloadUrl",
-    "ImportMediaFromDrive", "GetPartnerSharedMedia", "GetSharedLinksPage", "GetTrashPage",
+    "MoveToTrash", "RestoreFromTrash", "SetFavorite", "UnFavorite", "SetArchive", "UnArchive",
+    "SetItemTimestamp", "SetItemDescription", "SetItemGeoData", "DeleteItemGeoData", "AddItemsToNewAlbum",
+    "GetDownloadToken", "CheckDownloadToken", "SaveSharedMediaToLibrary", "SavePartnerSharedMedia",
+    "GetUnsupportedVideoDownloadUrl", "ImportMediaFromDrive", "GetPartnerSharedMedia", "GetSharedLinksPage",
+    "GetTrashPage", "MoveToLockedFolder", "RemoveFromLockedFolder", "SetAlbumItemOrder",
+}  # fmt: skip
+ALBUM_BUILDERS = {
+    "CreateAlbum", "AddItemsToExistingAlbum", "AddItemsToExistingSharedAlbum", "RemoveItemsFromAlbum",
+    "RemoveItemsFromSharedAlbum",
 }  # fmt: skip
 
 
@@ -40,6 +48,30 @@ def _strings(path: Path) -> list[str]:
 
 def test_transport_allowlist_is_exactly_the_read_rpcs():
     assert transport.RPC_ALLOWLIST == READ_RPCS
+
+
+def test_the_write_allowlist_is_exactly_the_album_changes():
+    assert transport.WRITE_RPC_ALLOWLIST == WRITE_RPCS
+    assert not transport.WRITE_RPC_ALLOWLIST & transport.RPC_ALLOWLIST
+    rpcids = set(re.findall(r'self\.rpcid = "([A-Za-z0-9]+)"', SOURCE[SRC / "vendor" / "gpwc" / "album_payloads.py"]))
+    assert rpcids == WRITE_RPCS
+    builders = {
+        name
+        for name, obj in vars(album_payloads).items()
+        if isinstance(obj, type) and obj.__module__ == album_payloads.__name__
+    }
+    assert builders == ALBUM_BUILDERS
+
+
+def test_album_changes_go_only_through_the_write_path():
+    # The album builders are used by the service's album methods only, and only GoogleTransport.write sends them.
+    for path in FILES:
+        if "album_payloads" in SOURCE[path] and path.name not in ("album_payloads.py",):
+            assert path.name == "client.py", path
+    client = SOURCE[SRC / "client.py"]
+    assert client.count("self._t.write(") == 1
+    write = SOURCE[SRC / "transport.py"].split("    def write(", 1)[1].split("\n    def ", 1)[0]
+    assert "WRITE_RPC_ALLOWLIST" in write and "retries=0" in write
 
 
 def test_every_payload_builder_uses_an_allowlisted_rpc():
@@ -63,9 +95,9 @@ def test_no_other_rpc_id_literal_anywhere():
         assert not found, (path, found)
 
 
-def test_no_write_builders_exist_or_are_imported():
+def test_no_other_write_builders_exist_or_are_imported():
     for name in WRITE_BUILDERS:
-        assert not hasattr(payloads, name), name
+        assert not hasattr(payloads, name) and not hasattr(album_payloads, name), name
         assert not re.search(rf"\b{name}\b", ALL), name
     # Only the vendored subset is imported, never an installed gpwc with its write builders.
     for path in FILES:
@@ -133,7 +165,7 @@ def test_only_get_and_post_and_post_only_to_batchexecute():
     text = SOURCE[SRC / "transport.py"]
     for verb in ("PUT", "PATCH", "DELETE"):
         assert not re.search(rf'"{verb}"', text), verb
-    assert re.findall(r'self\._send\(ctx, "(\w+)"', text) == ["POST", "GET"]
+    assert re.findall(r'self\._send\(\s*ctx, "(\w+)"', text) == ["POST", "GET"]
     assert "/data/batchexecute" in SOURCE[SRC / "vendor" / "gpwc" / "client.py"]
 
 

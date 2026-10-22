@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import secrets
 import threading
 import time
 from collections import OrderedDict
@@ -27,7 +28,7 @@ from .images import MAX_PX, TILE_MAX, Tile, contact_sheet, to_jpeg
 from .session import Snapshot
 from .state import StateStore
 from .transport import RpcResult
-from .vendor.gpwc import payloads
+from .vendor.gpwc import album_payloads, payloads
 from .vendor.gpwc.payloads import Payload
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,12 @@ TZ_SLACK_MS = 14 * 3_600_000
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 MAX_YEARS = 20
 MAX_PER_YEAR = 20
+# Album changes: at most this many items per call (Google's own limit), a title this long, a remove's confirm token
+# this long, and this many pages of an album searched for the items to remove.
+ALBUM_ITEMS_MAX = 50
+ALBUM_TITLE_MAX = 200
+CONFIRM_TTL = 600
+ALBUM_SCAN_PAGES = 20
 SHOW_MAX = 12
 SHOW_PX = 320
 DETAILS_MAX = 20
@@ -87,6 +94,8 @@ class Transport(Protocol):
     state: StateStore
 
     def rpc(self, payloads: Sequence[Payload]) -> list[RpcResult]: ...
+
+    def write(self, payloads: Sequence[Payload]) -> list[RpcResult]: ...
 
     def fetch_image(self, url: str) -> bytes: ...
 
@@ -98,6 +107,17 @@ class ItemMeta:
     thumb_url: str | None
     is_video: bool
     taken_at: str | None
+
+
+@dataclass(frozen=True)
+class _Removal:
+    """A previewed removal: what its confirm token allows, exactly."""
+
+    album: str
+    requested: tuple[str, ...]
+    found: tuple[str, ...]
+    shared: bool
+    created: float
 
 
 @dataclass(frozen=True)
@@ -189,6 +209,19 @@ def _camera(raw: Any) -> str | None:
     return " ".join(dict.fromkeys(strings)) or None
 
 
+def _album_key(album_id: Any) -> str:
+    if not isinstance(album_id, str) or not ID_RE.fullmatch(album_id):
+        raise invalid("album_id must be an id from photos_albums")
+    return album_id
+
+
+def _difference(larger: Any, smaller: Any) -> int | None:
+    """How many items an album gained or lost, from its counts before and after (None when Google gave none)."""
+    if isinstance(larger, int) and isinstance(smaller, int):
+        return max(0, larger - smaller)
+    return None
+
+
 def _media_filter(media: str) -> Callable[[rpc.RawItem], bool]:
     if media == "photos":
         return lambda item: not item.is_video
@@ -256,6 +289,8 @@ class PhotosService:
         self._names: OrderedDict[str, rpc.BatchInfo] = OrderedDict()
         self._album_auth: dict[str, str | None] = {}
         self._extras: dict[str, Any] = {}  # per scope: the latest page's extra (album title/count)
+        self._album_shared: dict[str, bool] = {}
+        self._removals: dict[str, _Removal] = {}
         self._canary_lock = threading.Lock()
         # (checked_at, generation checked, ok, code)
         self._canary: tuple[float, int | None, bool, str | None] | None = None
@@ -485,6 +520,7 @@ class PhotosService:
             with self._lock:
                 for album in albums:
                     self._album_auth[album.album_key] = album.auth_key
+                    self._album_shared[album.album_key] = album.is_shared
             return _Page(albums, next_token)
 
         albums, next_cursor, coverage = self._paged(scope_of("albums"), cursor, limit, fetch)
@@ -529,6 +565,195 @@ class PhotosService:
                 self._log_item(exc)
                 out.append({"id": key, "error": exc.payload()})
         return {"items": out, "freshness": self._freshness()}
+
+    # -- album changes -------------------------------------------------------------------------------------------
+
+    def album_create(self, title: str, ids: list[str] | None = None) -> dict[str, Any]:
+        """A new album, with up to 50 items in it. Never repeated on its own: a failure after sending is
+        outcome_unknown (photos_albums tells whether it exists)."""
+        name = title.strip() if isinstance(title, str) else ""
+        if not name or len(name) > ALBUM_TITLE_MAX:
+            raise invalid(f"title must be 1 to {ALBUM_TITLE_MAX} characters")
+        keys = check_ids(ids, ALBUM_ITEMS_MAX) if ids else []
+        self.state.take("write", 1 + len(keys))
+        (created,) = self._write([album_payloads.CreateAlbum(name)], action="create", album=None, items=0)
+        key = rpc.path(created, 0, 0)
+        if not isinstance(key, str) or not ID_RE.fullmatch(key):
+            raise PhotosError("refused", log_detail="OXvT9d returned no album key")
+        with self._lock:
+            self._album_shared[key] = False
+        self.state.audit({"action": "created", "album": key})
+        added = 0
+        if keys:
+            self._write([album_payloads.AddItemsToExistingAlbum(keys, key)], action="add", album=key, items=len(keys))
+        after = self._album_state(key)
+        if keys and after.get("count") is not None:
+            added = after["count"]
+        return {"album": after, "created": True, "requested": len(keys), "added": added, "freshness": self._freshness()}
+
+    def album_add(self, album_id: str, ids: list[str]) -> dict[str, Any]:
+        """Add up to 50 items (ids from search or list) to an album; Google keeps one copy of an item already in it.
+        The outcome is read back from the album."""
+        key = _album_key(album_id)
+        keys = check_ids(ids, ALBUM_ITEMS_MAX)
+        before = self._album_state(key)
+        self.state.take("write", len(keys))
+        payload = (
+            album_payloads.AddItemsToExistingSharedAlbum(keys, key)
+            if before["shared"]
+            else album_payloads.AddItemsToExistingAlbum(keys, key)
+        )
+        self._write([payload], action="add", album=key, items=len(keys))
+        after = self._album_state(key)
+        return {
+            "album": after,
+            "requested": len(keys),
+            "added": _difference(after.get("count"), before.get("count")),
+            "freshness": self._freshness(),
+        }
+
+    def album_remove(self, album_id: str, ids: list[str], confirm: str | None = None) -> dict[str, Any]:
+        """Remove up to 50 items from an album (they stay in the library). Without ``confirm``: a preview of
+        which of the ids are in the album, and a single-use confirm token for exactly these arguments. With it:
+        the removal, read back from the album."""
+        key = _album_key(album_id)
+        keys = check_ids(ids, ALBUM_ITEMS_MAX)
+        requested = tuple(sorted(keys))
+        now = self._clock()
+        if confirm is None:
+            state = self._album_state(key)
+            found = self._find_in_album(key, keys)
+            if not found:
+                raise invalid("none of these ids is in this album: use the ids photos_list(source=album) gives")
+            token = secrets.token_urlsafe(18)
+            with self._lock:
+                self._removals = {t: r for t, r in self._removals.items() if now - r.created < CONFIRM_TTL}
+                self._removals[token] = _Removal(key, requested, tuple(found), state["shared"], now)
+            names = self._filenames(list(found))
+            return {
+                "preview": True,
+                "album": state,
+                "remove": [self._raw_item(found[k], names, archived_default=None, album_id=key) for k in found],
+                "not_in_album": [k for k in keys if k not in found],
+                "confirm_token": token,
+                "expires_at": datetime.fromtimestamp(now + CONFIRM_TTL, UTC).isoformat(timespec="seconds"),
+                "next_step": (
+                    "Nothing was changed. Show the person which photos will leave this album (they stay in the "
+                    "library) and wait for their explicit yes; then call again with the same album_id and ids "
+                    "and confirm set to confirm_token."
+                ),
+            }
+        with self._lock:
+            removal = self._removals.pop(confirm, None) if isinstance(confirm, str) else None
+        if (
+            removal is None
+            or now - removal.created >= CONFIRM_TTL
+            or removal.album != key
+            or removal.requested != requested
+        ):
+            raise PhotosError("confirm_invalid", log_detail="unknown, expired or different removal")
+        before = self._album_state(key)
+        self.state.take("write", len(removal.found))
+        found = list(removal.found)
+        payload = (
+            album_payloads.RemoveItemsFromSharedAlbum(key, found)
+            if removal.shared
+            else album_payloads.RemoveItemsFromAlbum(found)
+        )
+        self._write([payload], action="remove", album=key, items=len(found))
+        after = self._album_state(key)
+        return {
+            "album": after,
+            "requested": len(found),
+            "removed": _difference(before.get("count"), after.get("count")),
+            "freshness": self._freshness(),
+        }
+
+    def _write(self, requests: list[Payload], *, action: str, album: str | None, items: int) -> list[Any]:
+        """Send album changes; every outcome goes to the audit log. Caches of album pages are dropped."""
+        try:
+            results = self._t.write(requests)
+        except PhotosError as exc:
+            self.state.audit({"action": action, "album": album, "items": items, "outcome": exc.code})
+            if exc.code == "outcome_unknown":
+                self._forget_pages()
+            raise
+        by_id = {r.payload_id: r for r in results}
+        data = [by_id[p.payload_id].data if p.payload_id in by_id else None for p in requests]
+        self._forget_pages()
+        if any(d is None for d in data) and action == "create":
+            self.state.audit({"action": action, "album": album, "items": items, "outcome": "refused"})
+            raise PhotosError("refused", log_detail=f"{requests[0].rpcid} returned no data")
+        self.state.audit({"action": action, "album": album, "items": items, "outcome": "sent"})
+        return data
+
+    def _forget_pages(self) -> None:
+        with self._lock:
+            self._pages.clear()
+            self._extras.clear()
+
+    def _album_state(self, key: str) -> dict[str, Any]:
+        """The album as Google shows it now (its first page, never from the cache)."""
+        data = self._one(payloads.GetAlbumPage(key, auth_key=self._album_auth.get(key)), required=False)
+        if data is None:
+            raise PhotosError("item_unavailable", log_detail="album page missing")
+        page = rpc.parse_album_page(data)
+        if page.auth_key:
+            with self._lock:
+                self._album_auth.setdefault(key, page.auth_key)
+        shared = self._is_shared(key)
+        return {
+            "id": key,
+            "url": ALBUM_URL.format(key),
+            "title": page.title,
+            "count": page.item_count,
+            "shared": shared,
+        }
+
+    def _is_shared(self, key: str) -> bool:
+        """Whether an album is shared, as the albums list says (an album page does not tell: live, private albums
+        have members and an auth key too). Looked up once per album, then kept; an album not found in the list is
+        this account's own."""
+        with self._lock:
+            known = self._album_shared.get(key)
+        if known is not None:
+            return known
+        token: str | None = None
+        for _ in range(ALBUM_SCAN_PAGES):
+            albums, token = rpc.parse_albums_page(
+                self._one(payloads.GetAlbumsPage(page_id=token, page_size=ALBUMS_UPSTREAM_PAGE), required=True)
+            )
+            with self._lock:
+                for album in albums:
+                    self._album_shared[album.album_key] = album.is_shared
+                    self._album_auth.setdefault(album.album_key, album.auth_key)
+                if key in self._album_shared:
+                    return self._album_shared[key]
+            if not token:
+                break
+        with self._lock:
+            self._album_shared[key] = False
+        return False
+
+    def _find_in_album(self, key: str, wanted: list[str]) -> dict[str, rpc.RawItem]:
+        """The wanted ids that the album's own listing holds, in the order asked (ALBUM_SCAN_PAGES pages at most)."""
+        remaining = set(wanted)
+        found: dict[str, rpc.RawItem] = {}
+        token: str | None = None
+        for _ in range(ALBUM_SCAN_PAGES):
+            payload = payloads.GetAlbumPage(key, page_id=token, auth_key=self._album_auth.get(key))
+            data = self._one(payload, required=False)
+            if data is None:
+                break
+            page = rpc.parse_album_page(data)
+            for item in page.items:
+                if item.media_key in remaining:
+                    found[item.media_key] = item
+                    remaining.discard(item.media_key)
+            token = page.next_token
+            if not remaining or not token:
+                break
+        return {k: found[k] for k in wanted if k in found}
 
     def view(self, ids: list[str], max_px: int = 1024) -> list[tuple[dict[str, Any], bytes | None]]:
         keys = check_ids(ids, 4)
@@ -597,7 +822,8 @@ class PhotosService:
         out = {
             "service": "photos-mcp",
             "version": __version__,
-            "read_only": True,
+            # The only changes this server makes: albums (create, add, remove). Nothing deletes or edits media.
+            "changes": ["albums"],
             "session": session,
             "breaker": state["breaker"],
             "budgets": state["budgets"],

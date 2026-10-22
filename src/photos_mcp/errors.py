@@ -52,6 +52,18 @@ NEXT_STEP: dict[str, str] = {
     ),
     "cursor_expired": "This cursor expired. Start again without a cursor and skip ids you already have.",
     "internal_error": "photos-mcp failed unexpectedly. Retry once; if it repeats, tell the operator.",
+    "outcome_unknown": (
+        "The change may or may not have reached Google (the connection failed after it was sent). Do not repeat "
+        "it: list the album (photos_list source=album) or photos_albums to see what happened."
+    ),
+    "refused": (
+        "Google refused the change and nothing was changed (for example an album this account cannot edit). Tell "
+        "the person; do not retry."
+    ),
+    "confirm_invalid": (
+        "This confirm token is unknown, expired, already used, or for other arguments. Call the tool again "
+        "without confirm for a fresh preview and ask the person before confirming."
+    ),
     "not_signed_in": (
         "This person's Google account is not connected here, or Google ended its session. Call photos_connect and "
         "give the person the link it returns: they sign in to Google themselves there. Retry after they have."
