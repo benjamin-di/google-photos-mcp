@@ -1,8 +1,11 @@
 # photos-mcp
 
-Read-only [MCP](https://modelcontextprotocol.io) server for one Google Photos library. An
+Read-only [MCP](https://modelcontextprotocol.io) server for Google Photos libraries. An
 assistant can **find** photos with Google Photos' own search (people, places, things, text
-in images, dates) and **look at** them, and nothing more: there is no write path.
+in images, dates) and **look at** them, and nothing more: there is no write path. It serves
+one library, or one per person behind an authenticating proxy ([Accounts](#accounts)), where
+each person connects their own Google account through a sign-in link
+([Signing in with a link](#signing-in-with-a-link)).
 
 Google's official Library API only sees media created by the calling app since
 2025-03-31, so photos-mcp speaks the private `batchexecute` RPCs that photos.google.com
@@ -22,6 +25,8 @@ on Linux (Python 3.12+).
 your browser profile ──photos-mcp-session──▶ session dir {cookies.txt, meta.json}
                                                       │ read-only
 MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir: budgets, breaker, thumbnail cache
+                                              │ sign-in links (optional, further accounts)
+                                    photos-mcp-login: one browser profile per account ──▶ their snapshots
 ```
 
 ## Quick start
@@ -117,6 +122,10 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 
 - The images and metadata the tools return go to your MCP client and, through it, to the
   model provider it uses.
+- With [sign-in links](#signing-in-with-a-link), the login service keeps each person's browser
+  profile, which stays signed in to their **whole Google account** (not only Photos), and
+  their snapshot. Whoever runs the server can use both: tell people so before they connect.
+  They can end it any time in their Google Account (Security, Your devices).
 - The state directory keeps a cache of thumbnails of your photos (up to
   `PHOTOS_CACHE_MAX_BYTES`, 2 GiB by default; `0` disables it). Treat it like the photos.
 - The session directory and the browser profile give full access to the Google account.
@@ -125,7 +134,9 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 
 ## Tools
 
-All are read-only (`readOnlyHint`); all but `photos_status` are `openWorldHint`.
+All are read-only (`readOnlyHint`) except `photos_connect`, which makes a sign-in link and
+exists only where sign-in links are configured; all but `photos_status` and `photos_connect`
+are `openWorldHint`.
 Arguments that fail the schema come back as the typed `invalid_argument` error naming the
 argument, never pydantic's raw text.
 
@@ -139,6 +150,7 @@ argument, never pydantic's raw text.
 | `photos_view` | `ids` ≤4, `max_px` 256–1568 (1024) | per id a label block (width/height of the returned JPEG) + a JPEG block (videos: poster frame) |
 | `photos_status` | – | account, generation, snapshot age, breaker, budgets left, cache, last error |
 | `photos_canary` | – | `{ok, code, checked_at, cached, snapshot_age_s, generation}` (monitoring) |
+| `photos_connect` | – | a one-time sign-in link for the caller's own account: `{url, expires_at, account_id, signed_in, next_step}` ([Signing in with a link](#signing-in-with-a-link)) |
 
 Items have one shape in search, list, album and get, every key present (null when
 unknown): `{id, type, taken_at, tz_known, filename, description, place, favourite,
@@ -194,6 +206,10 @@ Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable
 | `busy` | waited 30 s for the single request slot | retryable |
 | `upstream_error` | 5xx or network after 2 retries (a body must finish within 30 s), an app page without `_gd`, HTML or a redirect inside Google from batchexecute | retryable; the generation is kept |
 | `invalid_argument`, `invalid_cursor`, `cursor_expired`, `internal_error` | our own checks | as named |
+| `not_signed_in` | a further account without a snapshot (never connected, or its browser was signed out), or not yet bound to a Google address | `photos_connect` gives the person a sign-in link |
+| `account_not_connected` | the proxy named an account that is not configured, named none, or another bearer named one | the operator adds the account; never served from another account |
+| `connect_unavailable` | `photos_connect` for the default account (its session is the operator's) | as named |
+| `connect_limited` | more than 6 links an hour for one account | give the newest link |
 
 ## Liveness
 
@@ -279,8 +295,8 @@ flows back from photos-mcp to it.
 
 | Variable | Default | |
 |---|---|---|
-| `GOOGLE_PHOTOS_EXPECTED_EMAIL` | – | required; the only account served |
-| `MCP_BEARER_TOKEN` | – | required for `--transport http`; several tokens comma-separated |
+| `GOOGLE_PHOTOS_EXPECTED_EMAIL` | – | required; the (default) account served |
+| `MCP_BEARER_TOKEN` | – | required for `--transport http`; several tokens comma-separated (the first is the proxy's, [Accounts](#accounts)) |
 | `PHOTOS_SESSION_DIR` | `/session` | the snapshot, read-only |
 | `PHOTOS_STATE_DIR` | `/state` | `state.json` (budgets, breaker, dead generation, last error) and `cache/` |
 | `PHOTOS_DAILY_RPC_BUDGET` | 3000 | RPCs plus app-page loads per day |
@@ -288,11 +304,158 @@ flows back from photos-mcp to it.
 | `PHOTOS_BUDGET_TZ` | `UTC` | IANA time zone whose midnight resets the budgets |
 | `PHOTOS_CACHE_MAX_BYTES` | 2 GiB | thumbnail cache, LRU; 0 disables it |
 | `LOG_LEVEL` | `INFO` | photos-mcp's own log lines, JSON on stderr; FastMCP's startup lines and, over HTTP, the web server's access lines (with client addresses) are plain text |
+| `PHOTOS_TRUSTED_ACCOUNT_HEADER` | – | the header the authenticating proxy names the account in ([Accounts](#accounts)); unset: every request is the default account's |
+| `PHOTOS_DEFAULT_ACCOUNT` | `default` | the default account's id (what the proxy's header says for it) |
+| `PHOTOS_ACCOUNT_SESSIONS_DIR` | `/sessions` | the further accounts' snapshots, one directory per account (written by the login service), read-only |
+| `PHOTOS_PUBLIC_URL` | – | where people reach this server (the parent of `/mcp`, e.g. `https://example.com/photos`); with the next two it turns on `photos_connect` |
+| `PHOTOS_LOGIN_URL` | – | the login service on a private network, e.g. `http://photos-mcp-login:8080` (host and port only) |
+| `PHOTOS_LOGIN_TOKEN` | – | the login service's bearer (32+ characters), the same on both |
 
 `photos-mcp [--transport http|stdio] [--host 127.0.0.1] [--port 8000]` (the image passes
 `--host 0.0.0.0`): HTTP serves
 stateless streamable HTTP with JSON replies on `/mcp` and liveness on `/health` (it never
 calls Google).
+
+## Accounts
+
+One server can keep several people's libraries apart behind an authenticating reverse proxy
+that knows who is calling. Each account has its own snapshot, state (budgets, last error, the
+generation Google rejected), thumbnail cache, cursors and canary; Google's pacing and the
+breaker after pushback are shared, because Google sees one client.
+
+- The **default account** is the setup above: the snapshot in `PHOTOS_SESSION_DIR`,
+  `GOOGLE_PHOTOS_EXPECTED_EMAIL`, its state right in `PHOTOS_STATE_DIR`. A one-account server
+  needs nothing new. Its snapshot is the operator's to keep (with `photos-mcp-session` or
+  anything else that writes the format); sign-in links are not offered for it.
+- **Further accounts** live in `PHOTOS_STATE_DIR/accounts/<id>/` (ids are 1-32 lower-case
+  letters, digits or dashes), with their snapshots in `PHOTOS_ACCOUNT_SESSIONS_DIR/<id>/`,
+  which the login service writes after the person signed in through a link.
+- **Budgets are split, not added.** `PHOTOS_DAILY_RPC_BUDGET` and `PHOTOS_DAILY_THUMB_BUDGET`
+  stay the server's daily totals. Each further account has its own share; the default account
+  gets what is left. A change applies on the next call. If the totals are lowered below the
+  shares, every share shrinks in proportion (the default account then gets nothing).
+- **Which account a request is for** comes from `PHOTOS_TRUSTED_ACCOUNT_HEADER`, read only on
+  requests that carry the **first** token in `MCP_BEARER_TOKEN`: that one is the proxy's, so
+  only the proxy may hold it, and the proxy must remove any copy of the header a client sends.
+  With that token the header is required (a request the proxy did not name is refused, never
+  served as the default account). Any other token acts for the default account, and a header
+  with it is refused. A header naming an account that is not set up, or naming it twice, gets
+  `account_not_connected`. Over stdio there is no header: always the default account.
+- **An account serves one Google address.** It is bound by the first sign-in through its link
+  (or given with `--email` when the account is added) and never changes: a sign-in as another
+  Google account, or as one another account here serves, is refused. Until it is bound, the
+  account serves nothing (`not_signed_in`). Only that address's library is ever served, even
+  if the profile also holds another Google sign-in.
+- **Removing and re-adding** an id gives a new account: nothing of the old one (state, cache,
+  browser profile, snapshot) carries over; `admin account add` asks the login service to clear
+  any leftover profile first.
+
+```sh
+docker exec photos-mcp photos-mcp admin account add second --rpc-budget 1500 --thumb-budget 1000
+docker exec photos-mcp photos-mcp admin account budget second --rpc-budget 1000 --thumb-budget 800
+docker exec photos-mcp photos-mcp admin account list      # addresses, shares, session and keeper state
+docker exec photos-mcp photos-mcp admin account remove second   # also asks the login service to delete
+                                                                # its browser profile and snapshot
+```
+
+## Signing in with a link
+
+With the login service and a public address, a person connects their own Google account
+without the operator: they ask their assistant to connect Google Photos, the assistant calls
+`photos_connect` (the `not_signed_in` error points it there) and gives them the link, and they
+sign in on Google's own page in their browser, phone or computer.
+
+- **The login service** (`photos-mcp-login`, image `ghcr.io/benjamin-di/google-photos-mcp-login`,
+  built from `Dockerfile.login`) keeps one browser profile per account in
+  `PHOTOS_LOGIN_PROFILES` and writes the snapshots to `PHOTOS_LOGIN_SESSIONS` (the server's
+  `PHOTOS_ACCOUNT_SESSIONS_DIR`, mounted read-only there). Run it beside the server on a
+  private network with the same `PHOTOS_LOGIN_TOKEN`; it needs outbound access to Google.
+  One browser runs at a time.
+- **The window.** The page shows Google's sign-in page, running in that account's profile on a
+  virtual display, through [noVNC](https://github.com/novnc/noVNC) relayed by the server.
+  Nothing on the sign-in is automated: the person does every step, Google's own checks
+  included. Passkeys do not work in a remote window (they are turned off there): sign in with
+  the password and the code or prompt Google asks for.
+- **The window is locked down**, because the login service keeps every further account's
+  profile and snapshot: Chromium runs under a managed policy (`src/photos_login/chromium-policy.json`,
+  installed by the image) that refuses `file://`, `chrome://`, `view-source:`, `data:` and
+  DevTools pages, file dialogs, downloads, printing and saved passwords, and top-level pages
+  are limited to Google's sign-in hosts. The service opens no window without the policy
+  (`PHOTOS_LOGIN_UNMANAGED_BROWSER=1` overrides that, for trying it out on a computer of your
+  own only). The live view works only while the profile is shown signed out on Google's
+  sign-in page: a profile that is still signed in is checked, and exported, with nobody
+  watching, and an account notice of a signed-in profile ends the window instead of showing it.
+  Ctrl+V (Cmd+V) types the clipboard's text into the window (`src/photos_mcp/paste.js`, a small
+  add-on to noVNC's viewer; up to 1000 characters the window's keyboard has, which covers
+  ASCII); on a phone, noVNC's keyboard button opens the phone's keyboard.
+- **Once Google Photos shows a signed-in account**, the window checks that this account may
+  use it (its bound address, or any address no other account here serves), then writes the
+  snapshot from the same browser, as `photos-mcp-session browser export` does (it loads the
+  library and opens one photo, so the library must not be empty), and closes. The server then
+  binds the account to that address (also when the person closed the page meanwhile). A
+  refused sign-in wipes the profile.
+- **The keeper** opens each signed-in profile every hour (`PHOTOS_LOGIN_REFRESH_SECONDS`) and
+  writes a fresh snapshot, so Google's rotating cookies stay current. Only the browser decides
+  that a session ended, and only on evidence seen on two refreshes in a row: Google's sign-in
+  page, its signed-out page or a request to prove it is them again. Then the snapshot is
+  withdrawn, and the person's next call says `not_signed_in` (a new link). Another Google
+  account in the profile withdraws it at once. Anything else (an account notice, a slow page)
+  keeps the snapshot and tries again after 10 minutes. When Google rejects a generation, the
+  server asks the keeper to look again soon (at most every 5 minutes per account). The keeper
+  never signs in: it holds no password. `keeper.json` beside each snapshot says what it last
+  saw (`photos_status`: `keeper`).
+- **For the caller's account only.** The link is made for the account the request is for;
+  there is no way to ask for another account's link. A newer link replaces the older one; at
+  most 6 are made per account an hour.
+- **One sign-in, 20 minutes.** `<PHOTOS_PUBLIC_URL>/connect/<id>` (192 random bits) works until
+  a sign-in succeeds or 20 minutes pass; a reload or "try again" opens a new window, up to 4
+  times. The page names the account it connects and opens Google's sign-in only when the
+  person continues (so a chat app's link preview starts nothing). Its pages are never cached
+  and send no referrer. Requests for ids that do not exist are counted per address (the last
+  `X-Forwarded-For` entry, which the proxy must add): after 20 in ten minutes that address gets 429
+  instead of 404 (a real link keeps working). Nothing under `/connect` shows or returns a
+  session.
+- **Your proxy decides who can reach it.** `/connect/...` (the page, its calls, noVNC's files and
+  the live view's WebSocket) is served without the bearer, because people open it in a
+  browser; the link id is its credential. Route only `<prefix>/connect/...` to the server
+  without authentication, never anything else, and do not add your bearer to it.
+
+Login service settings: `PHOTOS_LOGIN_TOKEN` (required), `PHOTOS_LOGIN_PROFILES` (`/profiles`),
+`PHOTOS_LOGIN_SESSIONS` (`/sessions`), `PHOTOS_LOGIN_MINUTES` (20, a window's time),
+`PHOTOS_LOGIN_REFRESH_SECONDS` (3600), `PORT` (8080), `PHOTOS_LOGIN_UNMANAGED_BROWSER` (see
+above). Its API (behind the bearer) never returns a session; `/health` is open. As a compose file, beside the server:
+
+```yaml
+services:
+  photos-mcp:
+    image: ghcr.io/benjamin-di/google-photos-mcp:latest
+    read_only: true
+    volumes:
+      - ./session:/session:ro          # the default account's snapshot
+      - ./state:/state
+      - ./sessions:/sessions:ro        # the further accounts' snapshots
+    environment:
+      MCP_BEARER_TOKEN: ${PROXY_TOKEN}           # held by the authenticating proxy only
+      GOOGLE_PHOTOS_EXPECTED_EMAIL: you@example.com
+      PHOTOS_TRUSTED_ACCOUNT_HEADER: X-Account   # set by the proxy, never by clients
+      PHOTOS_PUBLIC_URL: https://example.com/photos
+      PHOTOS_LOGIN_URL: http://photos-mcp-login:8080
+      PHOTOS_LOGIN_TOKEN: ${LOGIN_TOKEN}
+    networks: [default, login]
+  photos-mcp-login:
+    image: ghcr.io/benjamin-di/google-photos-mcp-login:latest
+    read_only: true
+    shm_size: 512m
+    tmpfs: [/tmp, /home/login]
+    volumes:
+      - ./profiles:/profiles           # each account's Google sign-in: keep it private
+      - ./sessions:/sessions
+    environment:
+      PHOTOS_LOGIN_TOKEN: ${LOGIN_TOKEN}
+    networks: [login]                  # plus a network that reaches Google
+networks:
+  login: {}
+```
 
 ## Operations
 
@@ -303,9 +466,13 @@ calls Google).
 | `schema_changed` | Google changed a response: open an issue with the tool and `photos_status`' last error (the fix is a parser update in `rpc.py`, checked against GPTK's latest `parser.ts`) |
 | `media_session_required` repeating | the snapshot lacks the image host's cookies: open a photo in the profile, export again |
 | `account_mismatch` | stop; the snapshot or `GOOGLE_PHOTOS_EXPECTED_EMAIL` names the wrong account; never auto-corrected |
+| `not_signed_in` for a further account | the person connects again with `photos_connect`; `photos_status.keeper` (or `admin account list`) says whether the keeper saw a signed-out profile or an error |
+| `account_not_connected` | the proxy named an account that is not set up (`admin account add`), or sent no header with its token |
 
 Kill switch: stop the server and delete the session directory; sign the profile out of
-Google (or revoke the session in your Google account's security settings).
+Google (or revoke the session in your Google account's security settings). For a further
+account: `admin account remove <id>` (its profile and snapshot go too), or the person signs
+the server's browser out under Security, Your devices.
 
 ## Development
 
@@ -323,13 +490,17 @@ and the breaker in `state.json`, so keep the run short), review the output, chec
 pick it up), then delete the output directory. The anonymiser replaces every string and
 every number about the account (see `capture.py`).
 
-Layout: `src/photos_mcp/` — `server.py` (tools, transports), `client.py` (tool logic,
-paging, thumbnails), `transport.py` (HTTP policy), `session.py` (snapshot reader, cookies),
-`session_export.py` (`photos-mcp-session`), `state.py` (budgets, breaker), `config.py`
-(settings), `errors.py` (error codes), `cursors.py`, `cache.py`, `images.py`, `rpc.py`
-(response parsers), `capture.py` (recorded fixtures), `auth.py`, `logs.py`, `vendor/gpwc/`
-(request framing, read payloads). `docs/PAYLOADS.md` maps every RPC and field path to its
-source.
+Layout: `src/photos_mcp/` — `server.py` (tools, transports, the account registry),
+`client.py` (tool logic, paging, thumbnails), `transport.py` (HTTP policy), `session.py`
+(snapshot reader, cookies), `session_export.py` (`photos-mcp-session`), `state.py` (budgets,
+breaker), `accounts.py` (further accounts), `connect.py` (sign-in links), `login_client.py`
+(the login service's API), `admin.py`, `config.py` (settings), `errors.py` (error codes),
+`cursors.py`, `cache.py`, `images.py`, `rpc.py` (response parsers), `capture.py` (recorded
+fixtures), `auth.py`, `logs.py`, `vendor/gpwc/` (request framing, read payloads).
+`src/photos_login/` — the login service: `app.py` (API), `windows.py` (sign-in windows),
+`window.py` (the browser), `keeper.py`, `profiles.py`. `docs/PAYLOADS.md` maps every RPC and
+field path to its source. `scripts/login_e2e.py` checks sign-in links end to end with real
+browsers and a stand-in page (the release runs it in the login image).
 
 Contributions: see `CONTRIBUTING.md`. Report security problems privately as described in
 `SECURITY.md`, not in public issues.

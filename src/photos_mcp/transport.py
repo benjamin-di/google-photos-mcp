@@ -346,15 +346,19 @@ class GoogleTransport:
         reader: SessionReader,
         state: StateStore,
         *,
-        expected_email: str,
+        expected_email: str | None,
         sender_factory: Callable[[Snapshot], Sender] = CurlSender,
         pacer: Pacer | None = None,
         image_pacer: Pacer | None = None,
         clock: Callable[[], float] = time.time,
+        on_dead: Callable[[int, str], None] | None = None,
     ) -> None:
         self.reader = reader
+        # Hears (generation, code) when Google proved a generation dead: a keeper can then look at once.
+        self._on_dead = on_dead
         self.state = state
-        self.expected_email = expected_email.strip().lower()
+        # None: a linked account no sign-in has bound to a Google address yet; it serves nothing.
+        self.expected_email = expected_email.strip().lower() if expected_email else None
         self._sender_factory = sender_factory
         self.pacer = pacer or Pacer()
         self.image_pacer = image_pacer or Pacer(
@@ -439,6 +443,8 @@ class GoogleTransport:
         """Refuse before any network use when the breaker is open, the snapshot is missing,
         belongs to another account, or its generation already died."""
         self.state.check_breaker()
+        if self.expected_email is None:
+            raise PhotosError("not_signed_in", log_detail="no Google account bound to this account yet")
         snapshot = self.reader.current()
         if snapshot.email != self.expected_email:
             raise PhotosError("account_mismatch", log_detail="snapshot email differs from the expected account")
@@ -486,6 +492,11 @@ class GoogleTransport:
             with self._ctx_lock:
                 if self._ctx is ctx:
                     self._ctx = None
+            if self._on_dead is not None:
+                try:
+                    self._on_dead(ctx.snapshot.generation, code)
+                except Exception as exc:  # a notification; never the call's outcome
+                    log.warning("dead-generation notice failed (%s)", type(exc).__name__)
         return PhotosError(code, log_detail=why)
 
     # -- HTTP ---------------------------------------------------------------------------

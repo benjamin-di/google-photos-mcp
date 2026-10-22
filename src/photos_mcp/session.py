@@ -530,8 +530,10 @@ def _stat_key(st: os.stat_result) -> tuple[int, int, int]:
 class SessionReader:
     """Loads the snapshot lazily, stat-ing meta.json per call and reloading on a newer generation."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, missing_code: str = "session_unavailable") -> None:
         self.directory = Path(directory)
+        # A linked account without a snapshot is simply not signed in (yet, or any more): ``not_signed_in``.
+        self.missing_code = missing_code
         self._lock = threading.Lock()
         self._stat: tuple[int, int, int] | None = None
         self._snapshot: Snapshot | None = None
@@ -542,7 +544,7 @@ class SessionReader:
                 key = _stat_key(os.stat(self.directory / "meta.json"))
             except OSError:
                 self._stat = None
-                raise PhotosError("session_unavailable", log_detail="meta.json missing") from None
+                raise PhotosError(self.missing_code, log_detail="meta.json missing") from None
             if self._snapshot is not None and key == self._stat:
                 return self._snapshot
             fresh = read_snapshot(self.directory)

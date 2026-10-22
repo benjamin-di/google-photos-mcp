@@ -139,3 +139,22 @@ def test_browser_commands_explain_a_missing_playwright(monkeypatch):
     monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     with pytest.raises(export.ExportError, match="photos-mcp\\[session\\]"):
         export._playwright()
+
+
+@pytest.mark.parametrize(
+    ("url", "reading"),
+    [
+        ("https://accounts.google.com/ServiceLogin?continue=x", "signed_out"),
+        ("https://accounts.google.com/v3/signin/identifier?continue=x", "signed_out"),
+        ("https://accounts.google.com/AccountChooser", "signed_out"),
+        ("https://www.google.com/photos/about/", "signed_out"),
+        ("https://accounts.google.com/v3/signin/challenge/pwd", "challenge"),
+        ("https://accounts.google.com/speedbump/idvreenable", "challenge"),
+        ("https://accounts.google.com/web/recoveryoptions", "interstitial"),
+        ("https://gds.google.com/web/chip", "interstitial"),
+        ("https://photos.google.com/", None),
+        ("https://example.com/photos/about", None),
+    ],
+)
+def test_only_googles_sign_in_pages_read_as_signed_out(url, reading):
+    assert export.signed_out_page(url) == reading

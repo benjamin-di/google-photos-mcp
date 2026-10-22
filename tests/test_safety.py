@@ -75,12 +75,43 @@ def test_no_write_builders_exist_or_are_imported():
                 assert not any(alias.name.startswith("gpwc") for alias in node.names), path
 
 
+def _url_hosts(path: Path) -> set[str]:
+    hosts = set()
+    for text in _strings(path):
+        hosts |= set(re.findall(r"https?://([^/\"'\s?#]+)", text))
+    return hosts
+
+
 def test_only_allowlisted_hosts_appear_in_url_literals():
     hosts = set()
     for path in FILES:
-        for text in _strings(path):
-            hosts |= set(re.findall(r"https?://([^/\"'\s?#]+)", text))
+        if path.name != "config.py":
+            hosts |= _url_hosts(path)
     assert hosts <= {"photos.google.com", "github.com"}, hosts  # github.com: provenance links only
+
+
+def test_config_names_hosts_only_as_examples_and_patterns():
+    # The sign-in link settings: their validation patterns and the examples in their error messages.
+    found = _url_hosts(SRC / "config.py")
+    assert {h for h in found if not re.search(r"[\\(\[{|]", h)} <= {"example.com", "photos-mcp-login:8080"}, found
+
+
+def test_the_login_client_reaches_only_the_login_service():
+    # urllib.request and websockets appear only in login_client.py, and every URL it builds starts at
+    # PHOTOS_LOGIN_URL (urllib.parse is only string handling).
+    for path in FILES:
+        imported = {
+            alias.name for node in ast.walk(ast.parse(SOURCE[path])) if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module or "" for node in ast.walk(ast.parse(SOURCE[path]))
+            if isinstance(node, ast.ImportFrom) and node.level == 0
+        }  # fmt: skip
+        if any(name.startswith(("urllib.request", "urllib.error", "websockets")) for name in imported):
+            assert path.name == "login_client.py", path
+    text = SOURCE[SRC / "login_client.py"]
+    assert re.findall(r"urllib\.request\.Request\(\s*([^,]+),", text) == ["self.base + path"]
+    assert 'url = "ws" + self.base[len("http") :] + f"/logins/' in text
 
 
 def test_network_libraries_are_confined_to_the_transport():

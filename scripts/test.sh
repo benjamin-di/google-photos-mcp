@@ -31,10 +31,14 @@ trap finish EXIT
 printf 'Evidence: %s\n' "$invocation"
 .venv/bin/ruff check src tests scripts
 .venv/bin/ruff format --check src tests scripts
-# The image installs requirements-runtime.lock; it must be exactly uv.lock's runtime set.
+# The images install requirements-runtime.lock (server) and requirements-login.lock (login service); each must be
+# exactly uv.lock's set.
 uv export --frozen --no-dev --no-emit-project --no-header --quiet -o "$invocation/requirements-runtime.lock"
-if ! diff -u requirements-runtime.lock "$invocation/requirements-runtime.lock"; then
-    echo "requirements-runtime.lock is stale: run make lock" >&2
-    exit 1
-fi
+uv export --frozen --no-dev --extra login --no-emit-project --no-header --quiet -o "$invocation/requirements-login.lock"
+for lock in requirements-runtime.lock requirements-login.lock; do
+    if ! diff -u "$lock" "$invocation/$lock"; then
+        echo "$lock is stale: run make lock" >&2
+        exit 1
+    fi
+done
 .venv/bin/python -m pytest --junitxml="$invocation/junit.xml" "$@" 2>&1 | tee "$invocation/tests.log"

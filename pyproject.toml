@@ -1,7 +1,7 @@
 [project]
 name = "google-photos-mcp"
-version = "0.3.4"
-description = "Read-only MCP server for one Google Photos library over the web app's private RPCs"
+version = "0.4.1"
+description = "Read-only MCP server for Google Photos libraries over the web app's private RPCs"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]
@@ -25,6 +25,9 @@ Issues = "https://github.com/benjamin-di/google-photos-mcp/issues"
 [project.optional-dependencies]
 # photos-mcp-session browser: sign in once in a dedicated browser profile, export snapshots.
 session = ["playwright>=1.55"]
+# The login service (photos_login, its image Dockerfile.login): sign-in windows and the keeper. The server image
+# never installs it.
+login = ["patchright==1.61.2"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14"]
@@ -47,12 +50,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/photos_mcp"]
+packages = ["src/photos_mcp", "src/photos_login"]
 
 [project.scripts]
 google-photos-mcp = "photos_mcp.server:main"
 photos-mcp = "photos_mcp.server:main"  # the image's entrypoint and earlier docs
 photos-mcp-session = "photos_mcp.session_export:main"
+photos-mcp-login = "photos_login.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -68,4 +72,4 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = ["SIM105"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["photos_mcp"]
+known-first-party = ["photos_mcp", "photos_login"]

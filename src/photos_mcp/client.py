@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar
 
-from . import __version__, rpc
+from . import __version__, accounts, rpc
+from .accounts import Account
 from .cache import ThumbCache
 from .cursors import CursorState, CursorStore, scope_of
 from .errors import PhotosError, invalid
@@ -175,7 +176,13 @@ class PhotosService:
         cursors: CursorStore | None = None,
         *,
         clock: Callable[[], float] = time.time,
+        account: Account | None = None,
+        sign_in_links: bool = False,
     ) -> None:
+        # The account this service acts for (None: a single-account server built without the registry). Everything
+        # below (cursors, page and item caches, the thumbnail cache, budgets, the canary) is this account's alone.
+        self.account = account
+        self.sign_in_links = sign_in_links
         self._t = transport
         self._cache = cache
         self._cursors = cursors or CursorStore()
@@ -352,8 +359,11 @@ class PhotosService:
     def status(self) -> dict[str, Any]:
         snapshot = self._t.current_snapshot()
         state = self.state.describe()
+        linked = self.account is not None and self.account.linked
         session: dict[str, Any]
-        if snapshot is None:
+        if linked and (snapshot is None or getattr(self._t, "expected_email", None) is None):
+            session = {"state": "not_signed_in"}
+        elif snapshot is None:
             session = {"state": "session_unavailable"}
         else:
             session = snapshot.describe(self._clock())
@@ -367,7 +377,7 @@ class PhotosService:
                 session["state"] = "ok"
         if state["breaker"]["open"]:
             session["state"] = "blocked" if session["state"] == "ok" else session["state"]
-        return {
+        out = {
             "service": "photos-mcp",
             "version": __version__,
             "read_only": True,
@@ -377,6 +387,14 @@ class PhotosService:
             "last_error": state["last_error"],
             "cache": {"bytes": self._cache.size(), "max_bytes": self._cache.max_bytes},
         }
+        if self.account is not None:
+            out["account_id"] = self.account.id
+            # Whether photos_connect makes sign-in links for this account (the default account's session is the
+            # operator's to keep).
+            out["sign_in_links"] = self.sign_in_links and linked
+            if linked:
+                out["keeper"] = accounts.keeper_status(self.account)
+        return out
 
     def record_error(self, code: str) -> None:
         """Remember a real failure for photos_status; the agent's own input mistakes are not."""

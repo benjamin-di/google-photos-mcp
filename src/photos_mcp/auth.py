@@ -3,6 +3,9 @@
 ``MCP_BEARER_TOKEN`` holds the accepted token, or several separated by commas (for example
 one for a reverse proxy and one for direct clients, so either can be rotated alone). Only
 ``/mcp`` is protected; ``/health`` stays open. The stdio transport needs no token.
+
+The first token is the proxy's: only requests carrying it may name an account in the trusted
+account header (README "Accounts"), so only the authenticating proxy may hold it.
 """
 
 from __future__ import annotations
@@ -13,6 +16,8 @@ from collections.abc import Mapping
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
 TOKEN_VAR = "MCP_BEARER_TOKEN"
+# The client id of the first token: the proxy that names accounts.
+PROXY_CLIENT = "token-1"
 
 
 class AuthError(Exception):

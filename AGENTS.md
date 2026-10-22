@@ -19,6 +19,17 @@ and bump `schema` for an incompatible change.
 Never point a development run at a real account's session: the snapshot carries full
 Google account authority.
 
+The login service (`src/photos_login`) shows Google's sign-in page to a person and automates
+nothing on it: no click, keystroke or fill exists there (`tests/test_login_service.py` checks
+it statically). It never returns a session over its API. It holds every further account's
+profile and snapshot, so its window must stay locked down: the managed Chromium policy
+(`chromium-policy.json`; DevTools stays allowed in it because `DeveloperToolsAvailability=2`
+also closes the pipe the window is driven through), the top-level page allowlist, and the live
+view only in state `waiting`. `scripts/login_e2e.py` checks the policy in the image. `src/photos_mcp/paste.js` is shared
+verbatim with sibling projects that use the same noVNC sign-in window: change it there too.
+Browser-level behaviour is covered by `scripts/login_e2e.py`, which the release runs in the
+login image (a stand-in page, never Google).
+
 ## Everything in this tree is published
 
 Code, comments, docs, fixtures and commit messages must not name people, accounts, e-mail

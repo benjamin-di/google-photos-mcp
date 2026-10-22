@@ -63,7 +63,14 @@ _EMAIL_KEY = re.compile(r"\"oPEP7c\"\s*:\s*(\"(?:[^\"\\]|\\.)*\")")
 
 
 class ExportError(Exception):
-    """The snapshot cannot be written; the message says what to do."""
+    """The snapshot cannot be written; the message says what to do. ``code`` says why, for the login service's
+    keeper: ``signed_out`` (Google's sign-in page or signed-out landing page), ``challenge`` (Google wants the person
+    to prove it is them again), ``interstitial`` (an account notice), ``no_account``, ``account_mismatch``,
+    ``empty_library`` or ``failed``."""
+
+    def __init__(self, message: str, code: str = "failed") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # -- the snapshot (pure) ----------------------------------------------------------------------
@@ -156,12 +163,58 @@ def build_meta(
     return meta
 
 
+# Google's own sign-in pages: what a signed-out profile is sent to.
+_SIGN_IN_PATHS = re.compile(
+    r"/(?:ServiceLogin|AccountChooser|InteractiveLogin|signin/v2/identifier|v3/signin/identifier|"
+    r"v3/signin/accountchooser|signin/identifier|signin/chooser)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def signed_out_page(url: str) -> str | None:
+    """How a page Google sent the profile to reads: ``signed_out`` (its sign-in page, or the signed-out landing page
+    google.com/photos/about), ``challenge`` (any other accounts.google.com page: Google wants the person to prove it
+    is them), ``interstitial`` (an account notice under accounts.google.com/web/ or gds.google.com: not a sign-out),
+    or None (anything else, Google Photos included)."""
+    parts = urlsplit(url)
+    host, path = (parts.hostname or "").lower(), parts.path or "/"
+    if host == SIGN_IN_HOST:
+        if path.startswith("/web/"):
+            return "interstitial"
+        return "signed_out" if _SIGN_IN_PATHS.match(path) else "challenge"
+    if host == "gds.google.com":
+        return "interstitial"
+    if host in ("google.com", "www.google.com") and path.startswith("/photos/about"):
+        return "signed_out"
+    return None
+
+
+def settled_url(page: Any, *, seconds: float = 15.0) -> str:
+    """The page's address once Google's redirects have stopped (the same for 2 s, or after ``seconds``)."""
+    last, stable_since = page.url, time.monotonic()
+    deadline = stable_since + seconds
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+        if page.url != last:
+            last, stable_since = page.url, time.monotonic()
+        elif time.monotonic() - stable_since >= 2.0:
+            break
+    return last
+
+
 def published_generation(out_dir: Path) -> int:
     try:
         value = json.loads((out_dir / "meta.json").read_text()).get("generation")
     except (OSError, ValueError, AttributeError):
         return 0
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def unpublish(out_dir: Path) -> None:
+    """Withdraw a snapshot whose profile is signed out: meta.json first (the reader's commit point), then the
+    cookies. The next snapshot must still count its generation on from the last one (``min_generation``)."""
+    for name in ("meta.json", "cookies.txt"):
+        (out_dir / name).unlink(missing_ok=True)
 
 
 def publish(out_dir: Path, cookies: list[Cookie], meta: dict[str, Any]) -> Path:
@@ -363,68 +416,99 @@ def browser_export(
     channel: str | None,
 ) -> dict[str, Any]:
     """Load the library in the signed-in profile, open one photo, write a schema-2 snapshot."""
-    wire = WireHeaders()
-    images: list[int] = []
     with _playwright() as playwright:
         context = _launch(playwright, profile, channel=channel)
         try:
-            page = context.pages[0] if context.pages else context.new_page()
-            cdp = context.new_cdp_session(page)
-            cdp.on("Network.requestWillBeSent", wire.on_sent)
-            cdp.on("Network.requestWillBeSentExtraInfo", wire.on_wire)
-            cdp.send("Network.enable")
-            # Cache hits carry no wire headers: fetch for real during the export.
-            cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
-
-            def on_response(response: Any) -> None:
-                host = urlsplit(response.url).hostname or ""
-                if host == IMAGE_HOST and response.status == 200:
-                    images.append(response.status)
-
-            page.on("response", on_response)
-            page.goto(APP_URL, wait_until="domcontentloaded", timeout=60_000)
-            host = urlsplit(page.url).hostname or ""
-            if host == SIGN_IN_HOST or (urlsplit(page.url).path or "").startswith("/photos/about"):
-                raise ExportError("this profile is signed out: run 'photos-mcp-session browser login' first")
-            email = None
-            for _ in range(20):
-                if email := page_email(page.content()):
-                    break
-                page.wait_for_timeout(1000)
-            if not email:
-                raise ExportError("the library page never showed a signed-in account")
-            if expected_email and email.strip().lower() != expected_email.strip().lower():
-                raise ExportError("the profile is signed in to a different Google account than --expected-email")
-            before = len(images)
-            page.locator(TILE_SELECTOR).first.click(timeout=20_000)
-            for _ in range(20):
-                if len(images) > before:
-                    break
-                page.wait_for_timeout(1000)
-            else:
-                raise ExportError("opening a photo loaded no image; is the library empty?")
-            page.wait_for_timeout(2000)  # let the image host's cookies settle
-            user_agent = page.evaluate("() => navigator.userAgent")
-            headers, synthesised = wire.templates(user_agent)
-            cookies = select_cookies(browser_cookies(context.cookies()))
-        except ExportError:
-            raise
-        except Exception as exc:
-            raise ExportError(f"the browser export failed ({type(exc).__name__}); try again") from None
+            return export_from_context(context, out_dir, expected_email=expected_email)
         finally:
             try:
                 context.close()
             except Exception:
                 pass
+
+
+def export_from_context(
+    context: Any,
+    out_dir: Path,
+    *,
+    expected_email: str | None,
+    min_generation: int = 0,
+) -> dict[str, Any]:
+    """In an open browser context (Playwright's API: the CLI's own, or the login service's window): load the
+    library, open one photo, and write a schema-2 snapshot with a generation above both the published one and
+    ``min_generation``. Raises ExportError with its ``code``."""
+    wire = WireHeaders()
+    images: list[int] = []
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
+        cdp = context.new_cdp_session(page)
+        cdp.on("Network.requestWillBeSent", wire.on_sent)
+        cdp.on("Network.requestWillBeSentExtraInfo", wire.on_wire)
+        cdp.send("Network.enable")
+        # Cache hits carry no wire headers: fetch for real during the export.
+        cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+
+        def on_response(response: Any) -> None:
+            host = urlsplit(response.url).hostname or ""
+            if host == IMAGE_HOST and response.status == 200:
+                images.append(response.status)
+
+        page.on("response", on_response)
+        page.goto(APP_URL, wait_until="domcontentloaded", timeout=60_000)
+        out = signed_out_page(settled_url(page))
+        if out == "signed_out":
+            raise ExportError("this profile is signed out: run 'photos-mcp-session browser login' first", out)
+        if out == "challenge":
+            raise ExportError("Google wants the person to sign in again in this profile ('browser login')", out)
+        if out == "interstitial":
+            raise ExportError("Google shows an account notice in this profile: open it once and answer it", out)
+        email = None
+        for _ in range(20):
+            if email := page_email(page.content()):
+                break
+            page.wait_for_timeout(1000)
+        if not email:
+            raise ExportError("the library page never showed a signed-in account", "no_account")
+        if expected_email and email.strip().lower() != expected_email.strip().lower():
+            raise ExportError(
+                "the profile is signed in to a different Google account than --expected-email", "account_mismatch"
+            )
+        before = len(images)
+        try:
+            page.locator(TILE_SELECTOR).first.click(timeout=20_000)
+        except Exception as exc:
+            if type(exc).__name__ != "TimeoutError":  # Playwright's (and patchright's) own TimeoutError
+                raise
+            raise ExportError("the library shows no photo to open; is it empty?", "empty_library") from None
+        for _ in range(20):
+            if len(images) > before:
+                break
+            page.wait_for_timeout(1000)
+        else:
+            raise ExportError("opening a photo loaded no image; is the library empty?", "empty_library")
+        page.wait_for_timeout(2000)  # let the image host's cookies settle
+        user_agent = page.evaluate("() => navigator.userAgent")
+        headers, synthesised = wire.templates(user_agent)
+        cookies = select_cookies(browser_cookies(context.cookies()))
+    except ExportError:
+        raise
+    except Exception as exc:
+        raise ExportError(f"the browser export failed ({type(exc).__name__}); try again") from None
     meta = build_meta(
-        generation=published_generation(out_dir) + 1,
+        generation=max(published_generation(out_dir), min_generation) + 1,
         email=email,
         user_agent=user_agent,
         headers=headers,
         verified_at=datetime.now(UTC),
     )
     publish(out_dir, cookies, meta)
-    return {"out": str(out_dir), "schema": 2, "generation": meta["generation"], "synthesised_headers": synthesised}
+    return {
+        "out": str(out_dir),
+        "schema": 2,
+        "generation": meta["generation"],
+        "synthesised_headers": synthesised,
+        "email": meta["email"],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

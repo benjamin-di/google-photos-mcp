@@ -1,0 +1,28 @@
+{
+  "URLBlocklist": [
+    "file://*",
+    "chrome://*",
+    "chrome-untrusted://*",
+    "chrome-extension://*",
+    "devtools://*",
+    "view-source:*",
+    "filesystem:*",
+    "data:*",
+    "blob:*",
+    "javascript://*",
+    "ftp://*"
+  ],
+  "AllowFileSelectionDialogs": false,
+  "DownloadRestrictions": 3,
+  "PrintingEnabled": false,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "IncognitoModeAvailability": 1,
+  "BrowserGuestModeEnabled": false,
+  "BrowserAddPersonEnabled": false,
+  "EditBookmarksEnabled": false,
+  "ImportSavedPasswords": false
+}

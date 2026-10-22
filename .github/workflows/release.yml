@@ -1,8 +1,10 @@
 name: Release
 
-# On a vX.Y.Z tag: test the tagged tree, build the image for linux/amd64 and linux/arm64
-# (dependency stage first, keyed on its inputs and reused), smoke-test it, then tag it
-# X.Y.Z and latest in ghcr.io/<owner>/google-photos-mcp, and publish a GitHub release.
+# On a vX.Y.Z tag: test the tagged tree, build the server image for linux/amd64 and linux/arm64
+# (dependency stage first, keyed on its inputs and reused) and the login image (Dockerfile.login,
+# linux/amd64), smoke-test both, then tag them X.Y.Z and latest in
+# ghcr.io/<owner>/google-photos-mcp and ghcr.io/<owner>/google-photos-mcp-login, and publish a
+# GitHub release.
 on:
   push:
     tags: ['v*.*.*']
@@ -92,8 +94,52 @@ jobs:
           grep -q '"serverInfo"' <<<"$reply" || { echo "stdio initialize failed" >&2; exit 1; }
           docker buildx imagetools create -t "$IMAGE:$version" -t "$IMAGE:latest" "$candidate"
 
+  login-image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/google-photos-mcp-login
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, smoke-test, tag
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          candidate="$IMAGE:sha-$(git rev-parse --short=12 HEAD)"
+          docker buildx build --platform linux/amd64 -f Dockerfile.login --push -t "$candidate" \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(git show -s --format=%cI HEAD)" \
+            --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" .
+          docker pull -q "$candidate" >/dev/null
+          # Smoke: everything the windows need is there, it refuses to start without its bearer, never as root.
+          docker run --rm --network none --entrypoint sh "$candidate" -c '
+            set -e
+            [ "$(id -u)" = 1000 ]
+            python -c "import photos_login.app, photos_login.windows, photos_login.window, photos_login.keeper, patchright"
+            command -v Xvfb >/dev/null && command -v x11vnc >/dev/null
+            [ -f /opt/novnc/vnc.html ] && [ -f /opt/novnc/core/rfb.js ]'
+          rc=0
+          timeout 60 docker run --rm --network none "$candidate" || rc=$?
+          [ "$rc" = 1 ] || { echo "expected a refusal without PHOTOS_LOGIN_TOKEN, got exit $rc" >&2; exit 1; }
+          # End to end, offline, with a stand-in page instead of Google's (scripts/login_e2e.py).
+          timeout 300 docker run --rm --network none -v "$PWD/scripts/login_e2e.py:/tmp/login_e2e.py:ro" \
+            --entrypoint python "$candidate" /tmp/login_e2e.py
+          docker buildx imagetools create -t "$IMAGE:$version" -t "$IMAGE:latest" "$candidate"
+
   github-release:
-    needs: image
+    needs: [image, login-image]
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -1,5 +1,9 @@
 """State that survives restarts, in ``PHOTOS_STATE_DIR/state.json``: breaker, daily budgets,
-the generation known to be dead, and the last error. Written atomically on every change."""
+the generation known to be dead, and the last error. Written atomically on every change.
+
+With several accounts (``accounts``) each has its own store for its budgets, dead generation
+and last error, while the breaker stays in the default account's store (``breaker=``): Google's
+pushback is about this server's traffic, whichever account caused it."""
 
 from __future__ import annotations
 
@@ -36,8 +40,11 @@ class StateStore:
         thumb_budget: int,
         budget_tz: tzinfo = UTC,
         clock: Callable[[], float] = time.time,
+        breaker: StateStore | None = None,
     ) -> None:
         self.path = Path(state_dir) / "state.json"
+        # Another store that owns the breaker (the default account's), or None: this one does.
+        self._breaker_store = breaker
         self.rpc_budget = rpc_budget
         self.thumb_budget = thumb_budget
         # Daily budgets reset at midnight in this zone (PHOTOS_BUDGET_TZ).
@@ -94,6 +101,11 @@ class StateStore:
             self._data["budget"] = budget
         return budget
 
+    def set_budgets(self, *, rpc_budget: int, thumb_budget: int) -> None:
+        """New daily limits (an account's share changed); what was spent today still counts."""
+        with self._lock:
+            self.rpc_budget, self.thumb_budget = rpc_budget, thumb_budget
+
     def take(self, kind: str, count: int = 1) -> None:
         """Spend ``count`` units of the ``rpc`` or ``thumb`` budget, or raise budget_exhausted."""
         limit = self.rpc_budget if kind == "rpc" else self.thumb_budget
@@ -108,6 +120,8 @@ class StateStore:
     # -- breaker ------------------------------------------------------------------------
 
     def check_breaker(self) -> None:
+        if self._breaker_store is not None:
+            return self._breaker_store.check_breaker()
         with self._lock:
             breaker = self._data.get("breaker") or {}
             until = breaker.get("until") or 0
@@ -116,6 +130,8 @@ class StateStore:
 
     def trip_breaker(self) -> float:
         """Open the breaker after Google pushed back; returns when it closes."""
+        if self._breaker_store is not None:
+            return self._breaker_store.trip_breaker()
         now = self._clock()
         with self._lock:
             breaker = self._data.get("breaker") or {}
@@ -153,11 +169,17 @@ class StateStore:
 
     # -- status -------------------------------------------------------------------------
 
+    def _breaker(self) -> dict[str, Any]:
+        if self._breaker_store is not None:
+            with self._breaker_store._lock:
+                return dict(self._breaker_store._data.get("breaker") or {})
+        return dict(self._data.get("breaker") or {})
+
     def describe(self) -> dict[str, Any]:
         with self._lock:
             now = self._clock()
             budget = dict(self._budget())
-            breaker = self._data.get("breaker") or {}
+            breaker = self._breaker()
             until = breaker.get("until") or 0
             last = self._data.get("last_error") or {}
             dead = self._data.get("dead") or {}

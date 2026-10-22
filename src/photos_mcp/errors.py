@@ -15,7 +15,8 @@ NEXT_STEP: dict[str, str] = {
     ),
     "session_expired": (
         "Google rejected the session. Retry once photos_status shows a newer generation (the "
-        "operator refreshes the session snapshot)."
+        "operator, or for a connected person the server's keeper, refreshes the session snapshot); if "
+        "photos_status then says not_signed_in, call photos_connect."
     ),
     "account_mismatch": (
         "The session belongs to a different Google account. Stop and tell the operator; this "
@@ -51,6 +52,21 @@ NEXT_STEP: dict[str, str] = {
     ),
     "cursor_expired": "This cursor expired. Start again without a cursor and skip ids you already have.",
     "internal_error": "photos-mcp failed unexpectedly. Retry once; if it repeats, tell the operator.",
+    "not_signed_in": (
+        "This person's Google account is not connected here, or Google ended its session. Call photos_connect and "
+        "give the person the link it returns: they sign in to Google themselves there. Retry after they have."
+    ),
+    "account_not_connected": (
+        "This person has no Google Photos account on this server. Nothing was done. Tell them to ask the operator "
+        'to add one (README "Accounts"); then photos_connect gives them a link to sign in. Do not retry until then.'
+    ),
+    "connect_unavailable": (
+        "Sign-in links are not offered for this account: the operator keeps its session. Tell the operator."
+    ),
+    "connect_limited": (
+        "Too many sign-in links were made for this account in the last hour. Give the person the newest link, or "
+        "try again later."
+    ),
 }
 
 RETRYABLE = frozenset({"busy", "upstream_error", "stale_token", "internal_error"})
