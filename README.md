@@ -142,10 +142,12 @@ argument, never pydantic's raw text.
 
 | Tool | Input | Output |
 |---|---|---|
-| `photos_search` | `query` (≤200), `limit` 1–50 (20), `cursor` | items + `next_cursor` |
-| `photos_list` | `source` library\|archive\|album, `album_id` (iff album), `limit`, `cursor` | items + `next_cursor` (library and archive: Google pages of 100, sliced); with `source=album` also `album: {id, title, count}` |
-| `photos_albums` | `limit`, `cursor` | `{id, title, count}`, plus `shared: true` for shared albums |
-| `photos_get` | `ids` ≤10 (one batchexecute for all) | the item shape plus `uploaded_at` (UTC), lat/lon, camera, original width/height, size, duration, albums |
+| `photos_search` | `query` (≤200), `media` all\|photos\|videos, `details`, `limit` 1–50 (20), `cursor` | items + `next_cursor` |
+| `photos_list` | `source` library\|archive\|album\|favourites\|recently_added, `album_id` (iff album), `from_date`/`to_date` (library and archive), `media`, `details`, `limit`, `cursor` | items + `next_cursor` (Google pages of 100, sliced); with `source=album` also `album: {id, url, title, count}` |
+| `photos_albums` | `limit`, `cursor` | `{id, url, title, count}`, plus `shared: true` for shared albums |
+| `photos_get` | `ids` ≤10 (one batchexecute for all) | the item shape plus `uploaded_at` (UTC), lat/lon, camera, original width/height, size, duration, albums, `source`, `original_quality` |
+| `photos_on_this_day` | `date` (today), `years` 1–20 (10), `per_year` 1–20 (6) | `{date, years: [{year, items, more}], years_checked}` |
+| `photos_show` | `items` ≤12 `{id, note}`, `title` | a gallery card for the person ([Photo cards](#photo-cards)); the same data as JSON for other clients |
 | `photos_contact_sheet` | `ids` ≤24 | legend `n → id, date` + one JPEG grid ≤1568 px, numbered tiles, video badge |
 | `photos_view` | `ids` ≤4, `max_px` 256–1568 (1024) | per id a label block (width/height of the returned JPEG) + a JPEG block (videos: poster frame) |
 | `photos_status` | – | account, generation, snapshot age, breaker, budgets left, cache, last error |
@@ -153,10 +155,15 @@ argument, never pydantic's raw text.
 | `photos_connect` | – | a one-time sign-in link for the caller's own account: `{url, expires_at, account_id, signed_in, next_step}` ([Signing in with a link](#signing-in-with-a-link)) |
 
 Items have one shape in search, list, album and get, every key present (null when
-unknown): `{id, type, taken_at, tz_known, filename, description, place, favourite,
-archived}`. `taken_at` carries the item's UTC offset when `tz_known`; without a known
+unknown): `{id, url, type, taken_at, tz_known, filename, description, place, favourite,
+archived}`. `url` opens the item on photos.google.com (inside its album when listed from
+one); the person's own browser signs in, so it is also how they get an original. `taken_at` carries the item's UTC offset when `tz_known`; without a known
 offset it is the instant in UTC with `Z` (never a fake `+00:00`). Search records carry no
-place, so `place` is null there. `archived` comes from the source for `photos_list`
+place, so `place` is null there unless `details=true`, which reads each item's details
+(one item-info RPC per item, ten to a request; `limit` up to 20) and adds `lat`, `lon` and
+`camera`, filling `place` where the listing had none. `photos_get` adds `source` (how the
+item reached the library: `mobile`, `web`, `shared`, `partnerShared`, `drive`, `pc`,
+`gmail`, and `android` or `ios`) and `original_quality`. `archived` comes from the source for `photos_list`
 library (false) and archive (true), because live library records end before the flag;
 search and `photos_get` read it from the record; it is null where the record does not
 say (album items). Filenames come from a second RPC (EWgK9e); if it fails for any reason other than
@@ -165,6 +172,29 @@ no original or download path. Listings carry `coverage` (`pagination_complete`,
 `shared_partner: "not_covered"`, `archive_included` — false only for
 `source=library` — and `cursor_recovered` / `dedupe_required` / `loop_detected` when they
 apply) and `freshness` (`generation`, `session_verified_at`, `served_at`).
+
+`photos_list` sources: `library` (newest first by taken date, archive excluded),
+`archive`, `album`, `favourites` and `recently_added` (newest upload first; both are the web
+app's own filtered views of the search RPC and include archived items). `from_date` /
+`to_date` (`YYYY-MM-DD`, library and archive) bound the items' own local dates: the listing
+starts Google's timeline at the end of the range and stops once it has passed the start.
+`media=photos|videos` keeps one kind. A filtered listing reads up to 5 Google pages per call
+to find matches, so a page can hold fewer than `limit` items while `next_cursor` goes on.
+
+`photos_on_this_day` reads one library page per earlier year, starting at that day (up to 100
+items; `more` says the day holds more than shown or than one page could tell: list it with
+`from_date`=`to_date`), stops at the first year with nothing that old, and looks up all
+filenames in one RPC. "Today" is in `PHOTOS_BUDGET_TZ`.
+
+### Photo cards
+
+`photos_show` gives claude.ai, ChatGPT and other [MCP Apps](https://modelcontextprotocol.io)
+clients a gallery to draw for the person: thumbnail, date, the agent's note and a link that
+opens each photo in Google Photos. The thumbnails (320 px, from the same paced and cached
+image path as `photos_view`) travel inline in the result's `_meta["photos/view"]` as JPEG
+`data:` URLs, which the model is not sent; the card (`ui://photos/view.html`,
+`src/photos_mcp/view.html`) loads nothing else and opens links through the client. Clients
+without MCP Apps get the same items as JSON.
 
 `photos_canary` is the real-path check for monitoring: one real check (an
 upstream library page of 1 item plus that item's thumbnail, bypassing the thumbnail

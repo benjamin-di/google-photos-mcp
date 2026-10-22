@@ -6,6 +6,7 @@ responses are parsed by :mod:`photos_mcp.rpc`. Nothing here formats exception te
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import threading
@@ -14,7 +15,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, TypeVar
 
 from . import __version__, accounts, rpc
@@ -62,6 +63,24 @@ CANARY_TRANSIENT = frozenset({"upstream_error", "busy", "internal_error", "stale
 CANARY_MAX_AGE = 3 * 3600
 CANARY_MAX_FUTURE = 5 * 60  # a verified_at further ahead than this is not trusted
 CANARY_PX = 256
+# Links that open an item or album on photos.google.com (the person's own browser signs them in).
+PHOTO_URL = "https://photos.google.com/photo/{}"
+ALBUM_URL = "https://photos.google.com/album/{}"
+ALBUM_PHOTO_URL = "https://photos.google.com/album/{}/photo/{}"
+LIST_SOURCES = ("library", "archive", "album", "favourites", "recently_added")
+MEDIA = ("all", "photos", "videos")
+# A filtered listing (media type, date range) reads up to this many Google pages per call to find matches.
+FILTER_TARGET = 100
+FILTER_MAX_PAGES = 5
+# Local times differ from UTC by at most 14 hours: a date window is widened by this much upstream.
+DAY_MS = 86_400_000
+TZ_SLACK_MS = 14 * 3_600_000
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+MAX_YEARS = 20
+MAX_PER_YEAR = 20
+SHOW_MAX = 12
+SHOW_PX = 320
+DETAILS_MAX = 20
 
 
 class Transport(Protocol):
@@ -111,6 +130,39 @@ def check_ids(ids: Any, maximum: int) -> list[str]:
     return out
 
 
+def check_media(media: Any) -> str:
+    if media not in MEDIA:
+        raise invalid("media must be all, photos or videos")
+    return media
+
+
+def check_date(value: Any, name: str) -> date:
+    if not isinstance(value, str) or not DATE_RE.fullmatch(value):
+        raise invalid(f"{name} must be a date like 2024-03-18")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise invalid(f"{name} must be a real date like 2024-03-18") from None
+    if parsed.year < 1900:
+        raise invalid(f"{name} must be 1900 or later")
+    return parsed
+
+
+def local_date(taken_ts: Any, tz_offset: Any) -> date | None:
+    """The calendar date an item was taken on: its own local date when its offset is known, else UTC's."""
+    if not isinstance(taken_ts, int) or isinstance(taken_ts, bool):
+        return None
+    shift = tz_offset if rpc.tz_known(tz_offset) else 0
+    try:
+        return datetime.fromtimestamp((taken_ts + shift) / 1000, UTC).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def day_start_ms(day: date) -> int:
+    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+
+
 def check_limit(limit: Any) -> int:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
         raise invalid(f"limit must be between 1 and {MAX_LIMIT}")
@@ -137,6 +189,14 @@ def _camera(raw: Any) -> str | None:
     return " ".join(dict.fromkeys(strings)) or None
 
 
+def _media_filter(media: str) -> Callable[[rpc.RawItem], bool]:
+    if media == "photos":
+        return lambda item: not item.is_video
+    if media == "videos":
+        return lambda item: item.is_video
+    return lambda item: True
+
+
 def _compact(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None and v != [] and v is not False}
 
@@ -152,11 +212,14 @@ def _item(
     place: str | None,
     favourite: bool | None,
     archived: bool | None,
+    album_id: str | None = None,
 ) -> dict[str, Any]:
     """The one item shape of list, search, album and get: every key always present, null
-    when unknown. ``taken_at`` is local time with its offset when ``tz_known``, else UTC (Z)."""
+    when unknown. ``taken_at`` is local time with its offset when ``tz_known``, else UTC (Z).
+    ``url`` opens the item on photos.google.com (inside its album when listed from one)."""
     return {
         "id": key,
+        "url": ALBUM_PHOTO_URL.format(album_id, key) if album_id else PHOTO_URL.format(key),
         "type": type_,
         "taken_at": rpc.iso_time(taken_ts, tz_offset),
         "tz_known": rpc.tz_known(tz_offset),
@@ -203,29 +266,59 @@ class PhotosService:
 
     # -- tools --------------------------------------------------------------------------
 
-    def search(self, query: str, limit: int = 20, cursor: str | None = None) -> dict[str, Any]:
+    def search(
+        self,
+        query: str,
+        limit: int = 20,
+        cursor: str | None = None,
+        media: str = "all",
+        details: bool = False,
+    ) -> dict[str, Any]:
         limit = check_limit(limit)
+        media = check_media(media)
+        self._check_details(details, limit)
         query = (query or "").strip() if isinstance(query, str) else ""
         if not query or len(query) > 200:
             raise invalid("query must be 1 to 200 characters")
 
-        def fetch(token: str | None) -> _Page:
+        def fetch_raw(token: str | None) -> _Page:
             data = self._one(payloads.GetSearchPage(query, page_id=token), required=True)
             page = rpc.parse_library_page(data)
             return _Page(page.items, page.next_token)
 
-        items, next_cursor, coverage = self._paged(scope_of("search", query.casefold()), cursor, limit, fetch)
+        fetch = self._filtered(fetch_raw, _media_filter(media)) if media != "all" else fetch_raw
+        scope = scope_of("search", f"{query.casefold()}\x00{media}")
+        items, next_cursor, coverage = self._paged(scope, cursor, limit, fetch)
         coverage["archive_included"] = True  # Google's search finds archived items too
-        return self._listing(items, next_cursor, coverage)
+        return self._with_details(self._listing(items, next_cursor, coverage), details)
 
     def list(
-        self, source: str = "library", album_id: str | None = None, limit: int = 20, cursor: str | None = None
+        self,
+        source: str = "library",
+        album_id: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        media: str = "all",
+        details: bool = False,
     ) -> dict[str, Any]:
         limit = check_limit(limit)
-        if source not in ("library", "archive", "album"):
-            raise invalid("source must be library, archive or album")
+        media = check_media(media)
+        self._check_details(details, limit)
+        if source not in LIST_SOURCES:
+            raise invalid("source must be library, archive, album, favourites or recently_added")
         if (source == "album") != (album_id is not None):
             raise invalid("album_id is required for source=album and only then")
+        dated = from_date is not None or to_date is not None
+        if dated and source not in ("library", "archive"):
+            raise invalid("from_date and to_date work with source=library or archive")
+        first = check_date(from_date, "from_date") if from_date is not None else None
+        last = check_date(to_date, "to_date") if to_date is not None else None
+        if first and last and first > last:
+            raise invalid("from_date must not be after to_date")
+        keep = _media_filter(media)
         if source == "album":
             if not isinstance(album_id, str) or not ID_RE.fullmatch(album_id):
                 raise invalid("album_id must be an id from photos_albums")
@@ -241,28 +334,144 @@ class PhotosService:
                     self._album_auth.setdefault(key, page.auth_key)
                 return _Page(page.items, page.next_token, {"id": key, "title": page.title, "count": page.item_count})
 
-            items, next_cursor, coverage = self._paged(scope_of("album", key), cursor, limit, fetch_album)
+            fetch = self._filtered(fetch_album, keep) if media != "all" else fetch_album
+            items, next_cursor, coverage = self._paged(scope_of("album", f"{key}\x00{media}"), cursor, limit, fetch)
             coverage["archive_included"] = True
-            result = self._listing(items, next_cursor, coverage)
-            album = self._last_extra(scope_of("album", key))
+            result = self._listing(items, next_cursor, coverage, album_id=key)
+            album = self._last_extra(scope_of("album", f"{key}\x00{media}"))
             if album:
-                result["album"] = _compact(album)
-            return result
+                result["album"] = _compact({**album, "url": ALBUM_URL.format(key)})
+            return self._with_details(result, details)
+
+        if source in ("favourites", "recently_added"):
+            builder = payloads.GetFavoritesPage if source == "favourites" else payloads.GetLibraryPageByUploadedDate
+
+            def fetch_filtered_view(token: str | None) -> _Page:
+                page = rpc.parse_library_page(self._one(builder(page_id=token), required=True))
+                return _Page(page.items, page.next_token)
+
+            fetch = self._filtered(fetch_filtered_view, keep) if media != "all" else fetch_filtered_view
+            items, next_cursor, coverage = self._paged(scope_of(source, media), cursor, limit, fetch)
+            coverage["archive_included"] = True  # these views list archived items too
+            return self._with_details(self._listing(items, next_cursor, coverage), details)
 
         lcxim_source = "archive" if source == "archive" else "library"
+        # A date range starts Google's newest-first timeline at the end of the range (widened by the largest
+        # time-zone offset) and stops once it passes the range's start; each item's own local date decides.
+        anchor = day_start_ms(last + timedelta(days=1)) + TZ_SLACK_MS if last else None
+        floor = day_start_ms(first) - TZ_SLACK_MS if first else None
 
-        def fetch(token: str | None) -> _Page:
+        def fetch_raw(token: str | None) -> _Page:
             payload = payloads.GetLibraryPageByTakenDate(
-                page_id=token, source=lcxim_source, page_size=LIBRARY_UPSTREAM_PAGE
+                timestamp=anchor if token is None else None,
+                page_id=token,
+                source=lcxim_source,
+                page_size=LIBRARY_UPSTREAM_PAGE,
             )
             page = rpc.parse_library_page(self._one(payload, required=True))
             return _Page(page.items, page.next_token)
 
-        items, next_cursor, coverage = self._paged(scope_of(source), cursor, limit, fetch)
+        def in_range(item: rpc.RawItem) -> bool:
+            day = local_date(item.taken_ts, item.tz_offset)
+            if day is None:
+                return False
+            return (first is None or day >= first) and (last is None or day <= last)
+
+        def past(item: rpc.RawItem) -> bool:
+            return floor is not None and isinstance(item.taken_ts, int) and item.taken_ts < floor
+
+        if dated or media != "all":
+            fetch = self._filtered(fetch_raw, lambda i: keep(i) and (not dated or in_range(i)), stop=past)
+        else:
+            fetch = fetch_raw
+        scope = scope_of(source, f"{from_date}\x00{to_date}\x00{media}")
+        items, next_cursor, coverage = self._paged(scope, cursor, limit, fetch)
         coverage["archive_included"] = source == "archive"
         # Recorded live: lcxiM library records end before the archived flag (index 13), but the
         # source itself says it: library pages hold only unarchived items, archive pages only archived.
-        return self._listing(items, next_cursor, coverage, archived_default=source == "archive")
+        result = self._listing(items, next_cursor, coverage, archived_default=source == "archive")
+        return self._with_details(result, details)
+
+    def on_this_day(self, day: str | None = None, years: int = 10, per_year: int = 6) -> dict[str, Any]:
+        """Items taken on this calendar day in each of the previous ``years`` years, newest year first: one
+        library page per year (up to 100 items of that day), and one filename lookup for all of them."""
+        if not isinstance(years, int) or isinstance(years, bool) or not 1 <= years <= MAX_YEARS:
+            raise invalid(f"years must be between 1 and {MAX_YEARS}")
+        if not isinstance(per_year, int) or isinstance(per_year, bool) or not 1 <= per_year <= MAX_PER_YEAR:
+            raise invalid(f"per_year must be between 1 and {MAX_PER_YEAR}")
+        today = (
+            check_date(day, "date")
+            if day is not None
+            else datetime.fromtimestamp(self._clock(), self.state.budget_tz).date()
+        )
+        found: list[tuple[int, list[rpc.RawItem], bool]] = []
+        checked = 0
+        for back in range(1, years + 1):
+            year = today.year - back
+            if year < 1900:
+                break
+            try:
+                target = today.replace(year=year)
+            except ValueError:  # 29 February in a year without one
+                target = today.replace(year=year, day=28)
+            checked += 1
+            payload = payloads.GetLibraryPageByTakenDate(
+                timestamp=day_start_ms(target + timedelta(days=1)) + TZ_SLACK_MS,
+                source="library",
+                page_size=LIBRARY_UPSTREAM_PAGE,
+            )
+            page = rpc.parse_library_page(self._one(payload, required=True))
+            if not page.items:
+                break  # nothing this old: the library starts later
+            same_day = [r for r in page.items if local_date(r.taken_ts, r.tz_offset) == target]
+            oldest = local_date(page.items[-1].taken_ts, page.items[-1].tz_offset)
+            more = len(same_day) > per_year or (oldest is not None and oldest >= target and page.next_token)
+            if same_day:
+                found.append((year, same_day[:per_year], bool(more)))
+        chosen = [r for _, items, _ in found for r in items]
+        self._remember(chosen)
+        names = self._filenames([r.media_key for r in chosen])
+        return {
+            "date": today.strftime("%m-%d"),
+            "years": [
+                {"year": year, "items": [self._raw_item(r, names, archived_default=False) for r in items], "more": more}
+                for year, items, more in found
+            ],
+            "years_checked": checked,
+            "freshness": self._freshness(),
+        }
+
+    def show(self, picks: list[dict[str, Any]], title: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Photo cards: what the person sees (ids, dates, links and notes for the model too) and, apart, the
+        thumbnails the card draws (``SHOW_PX``, from the same paced and cached image path as photos_view)."""
+        if not isinstance(picks, list) or not 1 <= len(picks) <= SHOW_MAX:
+            raise invalid(f"items must hold 1 to {SHOW_MAX} photos")
+        keys = check_ids([p.get("id") if isinstance(p, dict) else None for p in picks], SHOW_MAX)
+        if len(keys) != len(picks):
+            raise invalid("every id may appear once")
+        notes = {p["id"]: (p.get("note") or None) for p in picks}
+        shown: list[dict[str, Any]] = []
+        thumbs: dict[str, str] = {}
+        for number, (key, result) in enumerate(zip(keys, self._thumbnails(keys, SHOW_PX), strict=True), start=1):
+            if isinstance(result, PhotosError):
+                shown.append({"n": number, "id": key, "url": PHOTO_URL.format(key), "error": result.payload()})
+                continue
+            jpeg, meta, _ = result
+            thumbs[key] = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+            shown.append(
+                _compact(
+                    {
+                        "n": number,
+                        "id": key,
+                        "url": PHOTO_URL.format(key),
+                        "taken_at": meta.get("taken_at"),
+                        "type": "video" if meta.get("video") else "photo",
+                        "note": notes.get(key),
+                    }
+                )
+            )
+        result = _compact({"kind": "photos", "title": title, "items": shown, "freshness": self._freshness()})
+        return result, {"thumbs": thumbs}
 
     def albums(self, limit: int = 20, cursor: str | None = None) -> dict[str, Any]:
         # Z5xsfc does not honour small page sizes (live: page_size 5 returned one of five
@@ -282,7 +491,15 @@ class PhotosService:
         coverage.pop("shared_partner", None)
         return {
             "albums": [
-                _compact({"id": a.album_key, "title": a.title, "count": a.item_count, "shared": a.is_shared})
+                _compact(
+                    {
+                        "id": a.album_key,
+                        "url": ALBUM_URL.format(a.album_key),
+                        "title": a.title,
+                        "count": a.item_count,
+                        "shared": a.is_shared,
+                    }
+                )
                 for a in albums
             ],
             "next_cursor": next_cursor,
@@ -568,24 +785,88 @@ class PhotosService:
         coverage: dict[str, Any],
         *,
         archived_default: bool | None = None,
+        album_id: str | None = None,
     ) -> dict[str, Any]:
         self._remember(raw_items)
         names = self._filenames([r.media_key for r in raw_items])
-        items = [
-            _item(
-                r.media_key,
-                type_="video" if r.is_video else "photo",
-                taken_ts=r.taken_ts,
-                tz_offset=r.tz_offset,
-                filename=names.get(r.media_key),
-                description=r.description,
-                place=r.place,
-                favourite=r.is_favorite,
-                archived=r.is_archived if r.is_archived is not None else archived_default,
-            )
-            for r in raw_items
-        ]
+        items = [self._raw_item(r, names, archived_default=archived_default, album_id=album_id) for r in raw_items]
         return {"items": items, "next_cursor": next_cursor, "coverage": coverage, "freshness": self._freshness()}
+
+    @staticmethod
+    def _raw_item(
+        r: rpc.RawItem, names: dict[str, str], *, archived_default: bool | None, album_id: str | None = None
+    ) -> dict[str, Any]:
+        return _item(
+            r.media_key,
+            type_="video" if r.is_video else "photo",
+            taken_ts=r.taken_ts,
+            tz_offset=r.tz_offset,
+            filename=names.get(r.media_key),
+            description=r.description,
+            place=r.place,
+            favourite=r.is_favorite,
+            archived=r.is_archived if r.is_archived is not None else archived_default,
+            album_id=album_id,
+        )
+
+    def _filtered(
+        self,
+        fetch_raw: Callable[[str | None], _Page],
+        keep: Callable[[rpc.RawItem], bool],
+        *,
+        stop: Callable[[rpc.RawItem], bool] | None = None,
+    ) -> Callable[[str | None], _Page]:
+        """A page of matching items: reads Google's pages from ``token`` until it has FILTER_TARGET matches, read
+        FILTER_MAX_PAGES pages, or ``stop`` says the listing has passed what can still match (then it ends)."""
+
+        def fetch(token: str | None) -> _Page:
+            matched: list[rpc.RawItem] = []
+            current, pages, extra = token, 0, None
+            while True:
+                page = fetch_raw(current)
+                pages += 1
+                extra = page.extra if page.extra is not None else extra
+                matched += [item for item in page.items if keep(item)]
+                ended = stop is not None and any(stop(item) for item in page.items)
+                current = None if ended else page.next_token
+                if current is None or len(matched) >= FILTER_TARGET or pages >= FILTER_MAX_PAGES:
+                    return _Page(matched, current, extra)
+
+        return fetch
+
+    @staticmethod
+    def _check_details(details: Any, limit: int) -> None:
+        if not isinstance(details, bool):
+            raise invalid("details must be true or false")
+        if details and limit > DETAILS_MAX:
+            raise invalid(f"details=true works with limit up to {DETAILS_MAX}")
+
+    def _with_details(self, result: dict[str, Any], details: bool) -> dict[str, Any]:
+        """details=true: each item also gets lat, lon and camera, and place where the listing had none (one
+        item-info RPC per item, ten to a request). An item whose details failed keeps them null."""
+        if not details:
+            return result
+        items = result["items"]
+        found: dict[str, Any] = {}
+        for start in range(0, len(items), 10):
+            chunk = [item["id"] for item in items[start : start + 10]]
+            try:
+                data = self._rpc(*[payloads.GetItemInfoExt(key) for key in chunk])
+            except PhotosError as exc:
+                if exc.code in SESSION_CODES:
+                    raise
+                self._log_item(exc)
+                continue
+            for key, raw in zip(chunk, data, strict=True):
+                found[key] = rpc.parse_item_info_ext(raw)
+        for item in items:
+            ext = found.get(item["id"])
+            item["lat"] = round(ext.lat, 6) if ext and ext.lat is not None else None
+            item["lon"] = round(ext.lng, 6) if ext and ext.lng is not None else None
+            item["camera"] = _camera(ext.camera) if ext else None
+            if item["place"] is None and ext and ext.location_name:
+                item["place"] = ext.location_name
+        return result
 
     def _remember(self, raw_items: Sequence[rpc.RawItem]) -> None:
         with self._lock:
@@ -666,7 +947,12 @@ class PhotosService:
             height=first(ext and ext.height, info and info.height),
             size_bytes=ext.size_bytes if ext else None,
             duration_s=round(duration / 1000, 1) if duration else None,
-            albums=[_compact({"id": a.album_key, "title": a.title}) for a in (ext.albums if ext else [])],
+            albums=[
+                _compact({"id": a.album_key, "title": a.title, "url": ALBUM_URL.format(a.album_key)})
+                for a in (ext.albums if ext else [])
+            ],
+            source=ext.source if ext and ext.source else None,
+            original_quality=first(ext and ext.is_original_quality, info and info.is_original_quality),
         )
         return item
 

@@ -22,6 +22,8 @@ TOOLS = {
     "photos_view",
     "photos_status",
     "photos_canary",
+    "photos_on_this_day",
+    "photos_show",
 }
 
 

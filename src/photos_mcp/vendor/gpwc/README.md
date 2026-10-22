@@ -20,7 +20,8 @@ Modifications for photos-mcp (2026-10-14):
 - **Read-only subset of payloads.** Only `GetLibraryPageByTakenDate` (`lcxiM`),
   `GetSearchPage` (`EzkLib`), `GetBatchMediaInfo` (`EWgK9e`), `GetAlbumsPage` (`Z5xsfc`),
   `GetAlbumPage` (`snAcKc`), `GetItemInfo` (`VrseUb`), `GetItemInfoExt` (`fDcn4b`) and
-  `GetStorageQuota` (`EzwWhf`) remain. Every write builder (trash, albums, favourites,
+  `GetStorageQuota` (`EzwWhf`) remain, plus (photos-mcp 0.5, from the same gpwc commit)
+  `GetLibraryPageByUploadedDate` and `GetFavoritesPage`, two filters of the search RPC `EzkLib`. Every write builder (trash, albums, favourites,
   sharing, archive, uploads, ...) was removed, as were `parser.py` and the
   `parse_response` / `execute` helpers; photos-mcp parses responses in `photos_mcp.rpc`.
 - **Payload ids** follow the web app: `"generic"` for a single RPC, `"1"`, `"2"`, ... in

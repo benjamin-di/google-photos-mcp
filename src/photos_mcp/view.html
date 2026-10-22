@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Photos</title>
+<!--
+  photos_show (MCP Apps, protocol 2026-01-26): the host loads this page in a sandboxed frame, answers ui/initialize,
+  then sends the tool's input and result. The thumbnails come inline in the result's _meta["photos/view"] as
+  data:image/jpeg URLs (Google's image links need the person's own Google session), so the page loads nothing from
+  anywhere. Links open photos.google.com through the host (ui/open-link). Everything is set as text, never as HTML:
+  notes come from the agent.
+-->
+<style>
+  :root {
+    --p-text: #1f1f1f; --p-muted: #5f6368; --p-border: #e3e3e3; --p-card: #ffffff; --p-soft: #f6f8fc;
+    --p-blue: #1a73e8; --p-bad: #c5221f;
+  }
+  :root[data-theme="dark"] {
+    --p-text: #e8eaed; --p-muted: #9aa0a6; --p-border: #3c4043; --p-card: #202124; --p-soft: #28292c;
+    --p-blue: #8ab4f8; --p-bad: #f28b82;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: var(--font-text-sm-size, 14px); line-height: 1.4; color: var(--color-text-primary, var(--p-text));
+  }
+  #root { padding: 4px 2px 8px; }
+  h2 { font-size: 15px; margin: 2px 2px 10px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--p-card); border: 1px solid var(--p-border); border-radius: 10px; overflow: hidden;
+          display: flex; flex-direction: column; }
+  .pic { position: relative; aspect-ratio: 1 / 1; background: var(--p-soft); cursor: pointer; border: 0; padding: 0;
+         display: block; width: 100%; }
+  .pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .badge { position: absolute; left: 6px; top: 6px; background: rgba(0, 0, 0, .62); color: #fff; font-size: 11px;
+           border-radius: 4px; padding: 1px 6px; }
+  .n { position: absolute; right: 6px; top: 6px; background: rgba(0, 0, 0, .62); color: #fff; font-size: 11px;
+       border-radius: 10px; min-width: 20px; text-align: center; padding: 1px 6px; }
+  .meta { padding: 7px 9px 9px; display: flex; flex-direction: column; gap: 3px; }
+  .when { color: var(--p-muted); font-size: 12px; }
+  .note { font-size: 13px; }
+  .open { color: var(--p-blue); font-size: 12px; text-decoration: none; cursor: pointer; background: none; border: 0;
+          padding: 0; text-align: left; font: inherit; font-size: 12px; }
+  .err { color: var(--p-bad); font-size: 12px; padding: 8px; }
+  .status { color: var(--p-muted); padding: 8px 2px; }
+</style>
+</head>
+<body>
+<div id="root"><div class="status">Loading photos…</div></div>
+<script>
+(() => {
+  "use strict";
+  const root = document.getElementById("root");
+  let hostCaps = {};
+  let locale;
+  let nextId = 1;
+  const pending = new Map();
+
+  // --- MCP Apps over postMessage (JSON-RPC 2.0, parent window only) ---
+  const send = (msg) => window.parent.postMessage(msg, "*");
+  const notify = (method, params) => send({ jsonrpc: "2.0", method, params: params || {} });
+  function request(method, params) {
+    const id = nextId++;
+    send({ jsonrpc: "2.0", id, method, params });
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      setTimeout(() => { if (pending.delete(id)) reject(new Error("timeout")); }, 15000);
+    });
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const m = event.data;
+    if (!m || m.jsonrpc !== "2.0") return;
+    if (m.method === undefined && m.id !== undefined) {
+      const p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      m.error ? p.reject(m.error) : p.resolve(m.result);
+      return;
+    }
+    if (m.id !== undefined) {
+      const known = m.method === "ui/resource-teardown" || m.method === "ping";
+      send(known ? { jsonrpc: "2.0", id: m.id, result: {} }
+                 : { jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "Method not found" } });
+      return;
+    }
+    if (m.method === "ui/notifications/tool-input") status("Loading photos…");
+    else if (m.method === "ui/notifications/tool-result") showResult(m.params || {});
+    else if (m.method === "ui/notifications/tool-cancelled") status("Cancelled.");
+    else if (m.method === "ui/notifications/host-context-changed") applyContext(m.params || {});
+  });
+
+  function applyContext(ctx) {
+    if (ctx.theme === "dark" || ctx.theme === "light") document.documentElement.dataset.theme = ctx.theme;
+    const vars = ctx.styles && ctx.styles.variables;
+    if (vars && typeof vars === "object") {
+      for (const [k, v] of Object.entries(vars)) {
+        if (k.startsWith("--") && typeof v === "string") document.documentElement.style.setProperty(k, v);
+      }
+    }
+    if (typeof ctx.locale === "string") locale = ctx.locale;
+  }
+  if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+    document.documentElement.dataset.theme = "dark";
+  }
+  let lastHeight = 0;
+  const reportSize = () => {
+    const h = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    if (h !== lastHeight) { lastHeight = h; notify("ui/notifications/size-changed", { height: h }); }
+  };
+  if (window.ResizeObserver) new ResizeObserver(reportSize).observe(document.documentElement);
+
+  function openPage(url) {
+    // Through the host, which may ask the person first; only a host that cannot open links gets a new window.
+    if (!hostCaps.openLinks) return window.open(url, "_blank", "noopener,noreferrer");
+    request("ui/open-link", { url }).catch(() => {});
+  }
+
+  // --- helpers: text only; links are photos.google.com pages, images inline JPEGs only ---
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+  function safeLink(u) {
+    try {
+      const x = new URL(u);
+      return x.protocol === "https:" && !x.port && x.hostname === "photos.google.com" ? x.href : null;
+    } catch (_) { return null; }
+  }
+  function safeThumb(u) {
+    return typeof u === "string" && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(u) ? u : null;
+  }
+  function when(iso) {
+    if (typeof iso !== "string") return "";
+    // The item's own local time when it has an offset; the date as Google gave it otherwise.
+    const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!m) return iso;
+    try {
+      const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]));
+      return d.toLocaleString(locale, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric",
+                                         hour: "2-digit", minute: "2-digit" });
+    } catch (_) { return iso.slice(0, 16).replace("T", " "); }
+  }
+  function status(text) { root.replaceChildren(el("div", "status", text)); }
+  function data(result) {
+    if (result.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+    for (const c of result.content || []) {
+      if (c && c.type === "text") { try { return JSON.parse(c.text); } catch (_) { /* not JSON */ } }
+    }
+    return null;
+  }
+
+  function showResult(result) {
+    const d = data(result);
+    const meta = (result._meta && result._meta["photos/view"]) || {};
+    const thumbs = (meta.thumbs && typeof meta.thumbs === "object") ? meta.thumbs : {};
+    if (result.isError || !d || d.error || d.kind !== "photos" || !Array.isArray(d.items)) {
+      const err = d && d.error;
+      status(err && err.next_step ? "Google Photos: " + err.next_step : "These photos could not be shown.");
+      return;
+    }
+    const out = [];
+    if (typeof d.title === "string" && d.title) out.push(el("h2", null, d.title));
+    const grid = el("div", "grid");
+    for (const item of d.items) {
+      if (!item || typeof item !== "object") continue;
+      const tile = el("div", "tile");
+      const link = safeLink(item.url);
+      const pic = el("button", "pic");
+      pic.type = "button";
+      const src = safeThumb(thumbs[item.id]);
+      if (src) {
+        const img = document.createElement("img");
+        img.alt = typeof item.note === "string" ? item.note : "photo " + item.n;
+        img.src = src;
+        pic.appendChild(img);
+      }
+      if (item.type === "video") pic.appendChild(el("span", "badge", "▶ video"));
+      if (Number.isInteger(item.n)) pic.appendChild(el("span", "n", item.n));
+      if (link) pic.addEventListener("click", () => openPage(link));
+      tile.appendChild(pic);
+      const metaBox = el("div", "meta");
+      if (item.error) metaBox.appendChild(el("div", "err", "This photo could not be loaded."));
+      if (item.taken_at) metaBox.appendChild(el("div", "when", when(item.taken_at)));
+      if (typeof item.note === "string" && item.note) metaBox.appendChild(el("div", "note", item.note));
+      if (link) {
+        const open = el("button", "open", "Open in Google Photos ↗");
+        open.type = "button";
+        open.addEventListener("click", () => openPage(link));
+        metaBox.appendChild(open);
+      }
+      tile.appendChild(metaBox);
+      grid.appendChild(tile);
+    }
+    out.push(grid);
+    root.replaceChildren(...out);
+  }
+
+  request("ui/initialize", {
+    appInfo: { name: "photos-view", version: "__VERSION__" },
+    appCapabilities: { availableDisplayModes: ["inline"] },
+    protocolVersion: "2026-01-26",
+  }).then((r) => {
+    hostCaps = (r && r.hostCapabilities) || {};
+    applyContext((r && r.hostContext) || {});
+    notify("ui/notifications/initialized");
+  }, () => { /* no MCP Apps host answered: results that still arrive are shown */ });
+})();
+</script>
+</body>
+</html>

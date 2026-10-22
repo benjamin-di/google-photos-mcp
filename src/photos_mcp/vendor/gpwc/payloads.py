@@ -36,6 +36,24 @@ class GetSearchPage(Payload):
         self.data = [query, None, page_id]
 
 
+class GetLibraryPageByUploadedDate(Payload):
+    """Newest upload first: ``EzkLib`` with the web app's "recently added" filter."""
+
+    def __init__(self, page_id: str | None = None):
+        super().__init__()
+        self.rpcid = "EzkLib"
+        self.data = ["", [[4, "ra", 0, 0]], page_id]
+
+
+class GetFavoritesPage(Payload):
+    """The favourites: ``EzkLib`` with the web app's favourites filter."""
+
+    def __init__(self, page_id: str | None = None):
+        super().__init__()
+        self.rpcid = "EzkLib"
+        self.data = ["Favorites", [[5, "8", 0, 9]], page_id]
+
+
 class GetItemInfo(Payload):
     def __init__(self, media_key: str, album_media_key: str | None = None, auth_key: str | None = None):
         super().__init__()

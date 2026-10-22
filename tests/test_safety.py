@@ -50,7 +50,8 @@ def test_every_payload_builder_uses_an_allowlisted_rpc():
         for name, obj in vars(payloads).items()
         if isinstance(obj, type) and obj.__module__ == payloads.__name__ and name != "Payload"
     }
-    assert len(builders) == len(READ_RPCS)
+    # EzkLib carries three read builders: search, recently added (uploaded date) and favourites.
+    assert len(builders) == len(READ_RPCS) + 2
     for name in builders:
         assert getattr(payloads, name).__mro__[1] is payloads.Payload
 

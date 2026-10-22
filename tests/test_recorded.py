@@ -36,7 +36,7 @@ from photos_mcp.state import StateStore
 from photos_mcp.transport import HttpResponse
 
 RECORDED = FIXTURES / "recorded"
-ITEM_KEYS = {"id", "type", "taken_at", "tz_known", "filename", "description", "place", "favourite", "archived"}
+ITEM_KEYS = {"id", "url", "type", "taken_at", "tz_known", "filename", "description", "place", "favourite", "archived"}
 RECORDINGS = sorted(RECORDED.glob("*.json")) if RECORDED.is_dir() else []
 
 

@@ -21,6 +21,7 @@ import logging
 import sys
 import threading
 from collections.abc import Callable
+from importlib import resources
 from typing import Annotated, Any, Literal, TypeVar
 
 import anyio.to_thread
@@ -32,7 +33,7 @@ from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -67,6 +68,28 @@ HTTP_OPTIONS: dict[str, Any] = {
 
 Limit = Annotated[int, Field(ge=1, le=50, description="Items per page (1-50)")]
 Cursor = Annotated[str | None, Field(max_length=200, description="next_cursor from the previous page")]
+Media = Annotated[Literal["all", "photos", "videos"], Field(description="Only photos, only videos, or all (default)")]
+Details = Annotated[
+    bool,
+    Field(description="Also lat, lon and camera per item, and place where missing (limit up to 20; one more request)"),
+]
+Day = Annotated[str | None, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="A date like 2024-03-18")]
+
+# Photo cards (MCP Apps): claude.ai and ChatGPT draw photos_show with this page in a sandboxed frame. The thumbnails
+# ride inline in the result's _meta (data: URLs: Google's image links need the person's Google session), the page
+# loads nothing else and opens photos.google.com links through the host.
+VIEW_URI = "ui://photos/view.html"
+VIEW_META = "photos/view"
+VIEW_HTML = (
+    (resources.files("photos_mcp") / "view.html").read_text(encoding="utf-8").replace("__VERSION__", __version__)
+)
+
+
+class Pick(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: Annotated[str, Field(min_length=8, max_length=128, description="An item id from this server")]
+    note: Annotated[str | None, Field(max_length=200, description="Your short caption for this photo")] = None
+
 
 _ERRORS = "\n".join(f"- {code}: {text}" for code, text in NEXT_STEP.items())
 
@@ -74,24 +97,33 @@ INSTRUCTIONS = f"""\
 Read-only access to one Google Photos library (the calling person's own account), through the
 same private web API photos.google.com uses. Nothing here can change the library.
 
-Flow: photos_search -> photos_contact_sheet -> photos_view.
+Flow: photos_search -> photos_contact_sheet -> photos_view, then photos_show for the person.
 1. photos_search(query) uses Google's own search: people (a name the library has
    labelled), places ("Paris"), things ("dog", "receipt", "whiteboard"), text in images,
    dates ("July 2023", "2019"), and combinations ("beach 2022"). photos_list walks the library (newest
-   first by taken date), the archive, or one album (photos_albums lists albums).
+   first by taken date; from_date/to_date for an exact range), the archive, one album
+   (photos_albums lists albums), the favourites, or what was uploaded most recently (recently_added).
+   Both take media=photos|videos. photos_on_this_day gives this day in earlier years.
 2. photos_contact_sheet(ids) shows up to 24 candidates as one numbered grid; the legend
    maps each number to its id and date. Use it to pick, instead of viewing one by one.
 3. photos_view(ids, max_px) returns up to 4 images (videos: the poster frame).
-   photos_get(ids) gives details: place, coordinates, camera, albums, description.
+   photos_get(ids) gives details: place, coordinates, camera, albums, description, source.
+4. Presenting: whenever you show the person photos you picked or found, call photos_show with
+   them and a short note each: claude.ai and ChatGPT draw a gallery with links to Google Photos.
+   Do it without being asked, then add only what the gallery does not show.
 
 Items have one shape everywhere (search, list, album, get), every key present, null when
-unknown: {{id, type, taken_at, tz_known, filename, description, place, favourite,
-archived}}. taken_at is local time with its UTC offset when tz_known is true; otherwise
+unknown: {{id, url, type, taken_at, tz_known, filename, description, place, favourite,
+archived}}. url opens the item on photos.google.com (the person's own browser signs in):
+link with it. taken_at is local time with its UTC offset when tz_known is true; otherwise
 the same instant in UTC ("Z") and the local time is unknown. Search results carry no
-place (Google's search response has none): use photos_get for it. photos_get adds
-uploaded_at (UTC), lat/lon, camera, width/height, size_bytes, duration_s and albums.
+place (Google's search response has none): pass details=true (adds place, lat, lon and
+camera; limit up to 20) or use photos_get. photos_get adds uploaded_at (UTC), lat/lon,
+camera, width/height, size_bytes, duration_s, albums, source (how it reached the library:
+mobile, web, shared, partnerShared, drive, pc, gmail; android, ios) and original_quality.
 
-Images: at most 1568 px on the longest edge; originals and downloads are not available.
+Images: at most 1568 px on the longest edge; originals and downloads are not available here
+(the person opens an item's url to download it).
 photos_view's width/height describe the returned JPEG, not the original (photos_get has
 the original's dimensions).
 
@@ -343,27 +375,43 @@ def create_server(
         ],
         limit: Limit = 20,
         cursor: Cursor = None,
+        media: Media = "all",
+        details: Details = False,
     ) -> dict[str, Any]:
         """Search the library with Google Photos' own search (people, places, things, text
-        in images, dates; archived items included). Returns items {id, type, taken_at,
+        in images, dates; archived items included). Returns items {id, url, type, taken_at,
         tz_known, filename, description, place, favourite, archived}, next_cursor, coverage
-        and freshness. place is always null here: Google's search response has no place
-        (photos_get has it)."""
-        return await call(PhotosService.search, query, limit, cursor)
+        and freshness. place is null here (Google's search response has none) unless
+        details=true, which also adds lat, lon and camera."""
+        return await call(PhotosService.search, query, limit, cursor, media, details)
 
     @mcp.tool(annotations=READ)
     async def photos_list(
-        source: Annotated[Literal["library", "archive", "album"], "library (default), archive, or album"] = "library",
+        source: Annotated[
+            Literal["library", "archive", "album", "favourites", "recently_added"],
+            Field(description="library (default), archive, album, favourites, or recently_added (newest upload first)"),
+        ] = "library",
         album_id: Annotated[
             str | None, Field(max_length=128, description="Album id; required iff source=album")
         ] = None,
+        from_date: Annotated[Day, Field(description="library/archive: taken on or after this date")] = None,
+        to_date: Annotated[Day, Field(description="library/archive: taken on or before this date")] = None,
+        media: Media = "all",
+        details: Details = False,
         limit: Limit = 20,
         cursor: Cursor = None,
     ) -> dict[str, Any]:
-        """List the library newest-first by taken date (archive excluded), the archive, or
-        one album (archived items included). Same item shape as photos_search; place is set
-        where Google's listing carries it."""
-        return await call(PhotosService.list, source, album_id, limit, cursor)
+        """List the library newest-first by taken date (archive excluded; from_date/to_date for
+        an exact range of the items' own local dates), the archive, one album, the favourites,
+        or what was uploaded most recently. Same item shape as photos_search; place is set
+        where Google's listing carries it (details=true adds it, with lat, lon and camera)."""
+
+        def run(svc: PhotosService) -> dict[str, Any]:
+            return svc.list(
+                source, album_id, limit, cursor, from_date=from_date, to_date=to_date, media=media, details=details
+            )
+
+        return await call(run)
 
     @mcp.tool(annotations=READ)
     async def photos_albums(limit: Limit = 20, cursor: Cursor = None) -> dict[str, Any]:
@@ -408,6 +456,48 @@ def create_server(
             if jpeg is not None:
                 content.append(Image(data=jpeg, format="jpeg").to_image_content())
         return ToolResult(content=content)
+
+    @mcp.tool(annotations=READ)
+    async def photos_on_this_day(
+        date: Annotated[Day, Field(description="The day to look back from (default: today)")] = None,
+        years: Annotated[int, Field(ge=1, le=20, description="How many earlier years to look at")] = 10,
+        per_year: Annotated[int, Field(ge=1, le=20, description="At most this many items per year")] = 6,
+    ) -> dict[str, Any]:
+        """Photos and videos taken on this calendar day in earlier years ("on this day"), newest
+        year first: {date, years: [{year, items, more}], years_checked}. more: that day holds more
+        than shown (photos_list with from_date=to_date=that day lists them all). One Google
+        request per year, so keep years modest."""
+        return await call(PhotosService.on_this_day, date, years, per_year)
+
+    @mcp.resource(
+        VIEW_URI,
+        name="photos-view",
+        title="Google Photos cards",
+        description="A gallery of photos (thumbnail, date, your note, link to Google Photos) for photos_show.",
+        mime_type="text/html;profile=mcp-app",
+        app={"prefersBorder": False},
+    )
+    def photos_view_card() -> str:
+        return VIEW_HTML
+
+    @mcp.tool(
+        title="Show photos",
+        annotations=READ,
+        app={"resourceUri": VIEW_URI, "visibility": ["model", "app"]},
+    )
+    async def photos_show(
+        items: Annotated[list[Pick], Field(min_length=1, max_length=12, description="Photos to show, in order")],
+        title: Annotated[str | None, Field(max_length=80, description="Heading above the gallery")] = None,
+    ) -> ToolResult:
+        """Show photos to the person as a gallery: thumbnail, date, your note and a link that opens
+        each one in Google Photos (claude.ai and ChatGPT draw it; other clients get the same
+        data as JSON). Use it whenever you present photos you picked or found."""
+
+        def run(svc: PhotosService) -> tuple[dict[str, Any], dict[str, Any]]:
+            return svc.show([pick.model_dump() for pick in items], title)
+
+        shown, view = await call(run)
+        return ToolResult(structured_content=shown, meta={VIEW_META: view})
 
     @mcp.tool(annotations=LOCAL)
     async def photos_status() -> dict[str, Any]:

@@ -15,7 +15,7 @@ from photos_mcp.errors import PhotosError
 NULLS_24 = [None] * 24
 NULLS_10 = [None] * 10
 KEY = "AF1QipFAKE0000000000000000000000000000000000"
-ITEM_KEYS = {"id", "type", "taken_at", "tz_known", "filename", "description", "place", "favourite", "archived"}
+ITEM_KEYS = {"id", "url", "type", "taken_at", "tz_known", "filename", "description", "place", "favourite", "archived"}
 
 
 def codes(excinfo):
@@ -38,6 +38,7 @@ def test_list_library_request_shape_item_shape_and_filenames(service, transport)
     first = result["items"][0]
     assert first == {
         "id": keys[0],
+        "url": f"https://photos.google.com/photo/{keys[0]}",
         "type": "video",
         "taken_at": "2025-10-29T16:50:48+01:00",
         "tz_known": True,
@@ -174,7 +175,7 @@ def test_album_listing(service, transport):
     key = load("snAcKc")[3][0]
     result = service.list(source="album", album_id=key, limit=2)
     assert transport.calls[0][0] == ("snAcKc", [key, None, None, None])
-    assert result["album"] == {"id": key, "title": "ny", "count": 3}
+    assert result["album"] == {"id": key, "url": f"https://photos.google.com/album/{key}", "title": "ny", "count": 3}
     assert len(result["items"]) == 2 and result["items"][0]["type"] == "video"
     assert set(result["items"][0]) == ITEM_KEYS and result["items"][0]["archived"] is None  # not in snAcKc
     assert result["coverage"]["archive_included"] is True
@@ -199,7 +200,12 @@ def test_unknown_album_is_item_unavailable(state, tmp_path):
 def test_albums(service, transport):
     result = service.albums(limit=50)
     assert transport.calls[0][0][1] == [None, None, None, None, 1, None, None, 100, [2], 5]
-    assert result["albums"][0] == {"id": result["albums"][0]["id"], "title": "location", "count": 1186}
+    assert result["albums"][0] == {
+        "id": result["albums"][0]["id"],
+        "url": f"https://photos.google.com/album/{result['albums'][0]['id']}",
+        "title": "location",
+        "count": 1186,
+    }
     assert result["albums"][1]["title"] == "ny"
     assert result["next_cursor"] is not None
     last = service.albums(limit=50, cursor=result["next_cursor"])
