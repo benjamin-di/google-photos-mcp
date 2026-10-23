@@ -37,6 +37,7 @@ from pathlib import Path
 
 import uvicorn
 from patchright.async_api import async_playwright
+from signin_window.service import Windows
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
@@ -44,7 +45,7 @@ from photos_login import window
 from photos_login.app import build_app
 from photos_login.keeper import Keeper
 from photos_login.profiles import Paths
-from photos_login.windows import Windows
+from photos_login.windows import SignIn
 from photos_mcp import accounts, session_export
 from photos_mcp.auth import bearer_auth_from_env
 from photos_mcp.config import Settings
@@ -118,7 +119,9 @@ class StandIn:
         self.focus = threading.Event()
         self.blocked: list[str] = []
 
-    def __call__(self, login, email, taken, min_generation, on_state):  # type: ignore[no-untyped-def]
+    def __call__(self, *, profile, session_dir, layout, env, email, taken, min_generation, cancel, deadline, on_state,
+                 require_policy):  # type: ignore[no-untyped-def]  # fmt: skip
+        """window.sign_in's interface (photos_login.windows.SignIn runs it)."""
         from patchright.sync_api import sync_playwright
 
         self.calls += 1
@@ -127,11 +130,10 @@ class StandIn:
             meta = session_export.build_meta(
                 generation=min_generation + 1, email=PERSON, user_agent=UA, headers=None, verified_at=datetime.now(UTC)
             )
-            session_export.publish(self.paths.session(login.account), parse_cookies_txt(COOKIES), meta)
+            session_export.publish(session_dir, parse_cookies_txt(COOKIES), meta)
             return {"email": PERSON, "generation": meta["generation"]}
         with sync_playwright() as pw:
-            env = {**os.environ, "DISPLAY": login.display}
-            browser = window.launch(pw, self.paths.profile(login.account), "desktop", env)
+            browser = window.launch(pw, profile, "desktop", env)
             try:
                 page = browser.pages[0] if browser.pages else browser.new_page()
                 if self.managed:
@@ -146,7 +148,7 @@ class StandIn:
                     probe.close()
                 page.set_content(FIELD_PAGE)
                 on_state("waiting", "accounts.google.com")
-                while not login.cancel.is_set():
+                while not cancel.is_set():
                     if self.focus.is_set():
                         page.locator("#f").focus()
                         self.focus.clear()
@@ -168,17 +170,16 @@ async def main() -> int:
     stand_in = StandIn(paths, managed=managed)
     lock = threading.Lock()
     windows = Windows(
-        paths,
-        lock,
+        SignIn(paths, require_policy=managed, sign_in=stand_in),
         minutes=5,
         xvfb=os.environ.get("PHOTOS_LOGIN_XVFB") or "Xvfb",
         x11vnc=os.environ.get("PHOTOS_LOGIN_X11VNC") or "x11vnc",
-        runner=stand_in,
-        require_policy=managed,
+        lock=lock,
     )
     keeper = Keeper(paths, lock, refresher=lambda **kw: {})
     novnc = Path(os.environ.get("PHOTOS_LOGIN_NOVNC") or "/opt/novnc")
-    await serve(build_app(windows, keeper, token=LOGIN_TOKEN, novnc_dir=novnc), login_port)
+    app = build_app(windows, keeper, paths, lock, token=LOGIN_TOKEN, novnc_dir=novnc, require_policy=managed)
+    await serve(app, login_port)
 
     (root / "session").mkdir()
     base = f"http://127.0.0.1:{mcp_port}/photos"
@@ -250,11 +251,16 @@ async def main() -> int:
 
         await page.close(run_before_unload=True)  # pagehide sends the cancel
         for _ in range(300):  # closing ends Chromium, x11vnc and Xvfb, which can take a few seconds
-            if not lock.locked() and all(login.ended_at for login in windows._logins.values()):
+            if not lock.locked() and all(login.ended_at for login in windows._windows.values()):
                 break
             await asyncio.sleep(0.1)
         else:
             print("FAIL: closing the page did not close the sign-in window", file=sys.stderr)
+            # Which part did not happen: the cancel never arrived (cancel unset), or the window was slow to end.
+            for login in windows._windows.values():
+                print(f"  window {login.id[:6]}: state={login.state} cancel={login.cancelled.is_set()} "
+                      f"ended={login.ended_at is not None} error={login.error}", file=sys.stderr)  # fmt: skip
+            print(f"  lock held: {lock.locked()}", file=sys.stderr)
             return 1
         print("closing the page closed the sign-in window")
 

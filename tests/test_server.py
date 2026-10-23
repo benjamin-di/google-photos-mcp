@@ -28,9 +28,16 @@ TOOLS = {
     "photos_album_add",
     "photos_album_remove",
     "photos_upload",
+    "photos_delete",
+    "photos_restore",
+    "photos_album_delete",
 }
 # The tools that change a library: album changes and uploads.
-CHANGE_TOOLS = {"photos_album_create", "photos_album_add", "photos_album_remove", "photos_upload"}
+CHANGE_TOOLS = {
+    "photos_album_create", "photos_album_add", "photos_album_remove", "photos_album_delete", "photos_upload",
+    "photos_delete", "photos_restore",
+}  # fmt: skip
+DESTRUCTIVE = {"photos_album_remove", "photos_album_delete", "photos_delete"}
 
 
 def run(coro):
@@ -51,9 +58,9 @@ def test_tool_surface_and_annotations(service):
     tools = run(_list(create_server(service)))
     assert {tool.name for tool in tools} == TOOLS
     for tool in tools:
-        # Only the album tools and uploads change anything; only removing is destructive.
+        # Only the album tools, uploads and the trash change anything; removing and deleting are destructive.
         assert tool.annotations.read_only_hint is (tool.name not in CHANGE_TOOLS), tool.name
-        assert tool.annotations.destructive_hint is (tool.name == "photos_album_remove"), tool.name
+        assert tool.annotations.destructive_hint is (tool.name in DESTRUCTIVE), tool.name
         assert tool.annotations.open_world_hint is (tool.name != "photos_status"), tool.name
 
 
@@ -92,7 +99,7 @@ def test_contact_sheet_returns_legend_then_jpeg(service):
 def test_status_tool(service):
     result = run(_call(create_server(service), "photos_status", {}))
     body = json.loads(result.content[0].text)
-    assert body["session"]["state"] == "ok" and body["changes"] == ["albums", "uploads"]
+    assert body["session"]["state"] == "ok" and body["changes"] == ["albums", "uploads", "trash"]
 
 
 def test_typed_error_payload(service, transport):
@@ -126,7 +133,7 @@ def test_input_validation_is_enforced_by_the_schema(service, transport):
         ("photos_view", {"ids": ["AF1QipFAKE01"], "max_px": 1569}),
         ("photos_contact_sheet", {"ids": ["AF1QipFAKE01"] * 25}),
         ("photos_get", {"ids": []}),
-        ("photos_list", {"source": "trash"}),
+        ("photos_list", {"source": "locked_folder"}),
     ):
         result = run(_call(server, name, args, raise_on_error=False))
         assert result.is_error, (name, args)

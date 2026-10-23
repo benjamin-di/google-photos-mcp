@@ -4,9 +4,11 @@
 **find** photos with Google Photos' own search (people, places, things, text in images,
 dates), **look at** them, show them to the person as a gallery, **add** photos and videos
 (from the person's phone or computer through a one-time upload page, from a link, or a file
-the assistant has; [Uploading](#uploading)) and **organise albums** (create one, add photos,
-take them out again after the person confirms). It never deletes, archives, edits or shares a
-photo ([Safety](#safety-and-google-posture)). It serves
+the assistant has; [Uploading](#uploading)), **delete** them (to the trash, where Google keeps
+them 60 days, and back again) and **organise albums** (create one, add photos, take them out,
+delete it). The tools that take something away are marked destructive, so MCP clients ask the
+person before each call; nothing empties the trash, archives, edits or shares a photo
+([Safety](#safety-and-google-posture)). It serves
 one library, or one per person behind an authenticating proxy ([Accounts](#accounts)), where
 each person connects their own Google account through a sign-in link
 ([Signing in with a link](#signing-in-with-a-link)).
@@ -152,13 +154,16 @@ argument, never pydantic's raw text.
 | Tool | Input | Output |
 |---|---|---|
 | `photos_search` | `query` (≤200), `media` all\|photos\|videos, `details`, `limit` 1–50 (20), `cursor` | items + `next_cursor` |
-| `photos_list` | `source` library\|archive\|album\|favourites\|recently_added, `album_id` (iff album), `from_date`/`to_date` (library and archive), `media`, `details`, `limit`, `cursor` | items + `next_cursor` (Google pages of 100, sliced); with `source=album` also `album: {id, url, title, count}` |
+| `photos_list` | `source` library\|archive\|album\|favourites\|recently_added\|trash, `album_id` (iff album), `from_date`/`to_date` (library and archive), `media`, `details`, `limit`, `cursor` | items + `next_cursor` (Google pages of 100, sliced); with `source=album` also `album: {id, url, title, count}` |
 | `photos_albums` | `limit`, `cursor` | `{id, url, title, count}`, plus `shared: true` for shared albums |
 | `photos_get` | `ids` ≤10 (one batchexecute for all) | the item shape plus `uploaded_at` (UTC), lat/lon, camera, original width/height, size, duration, albums, `source`, `original_quality` |
 | `photos_on_this_day` | `date` (today), `years` 1–20 (10), `per_year` 1–20 (6) | `{date, years: [{year, items, more}], years_checked}` |
 | `photos_album_create` | `title` (≤200), `ids` ≤50 | the new album `{id, url, title, count, shared}`, `added` |
 | `photos_album_add` | `album_id`, `ids` ≤50 (from search or list) | the album afterwards, `requested`, `added` (from its counts) |
-| `photos_album_remove` | `album_id`, `ids` ≤50 (as the album's own listing gives them), `confirm` | without `confirm`: a preview (`remove`, `not_in_album`, `confirm_token`, `expires_at`) and no change; with it: the album afterwards and `removed` |
+| `photos_album_remove` | `album_id`, `ids` ≤50 (as the album's own listing gives them) | the album afterwards, `removed` (from its counts) and `not_in_album` (ids it does not hold, left alone) |
+| `photos_album_delete` | `album_id` (one of the account's own albums) | the album and `deleted` (read back: the album no longer opens). Its photos stay in the library |
+| `photos_delete` | `ids` ≤50 (from search or list) | `trashed`, `not_found` (not items of this library) and per id `in_trash` (read back from the trash) |
+| `photos_restore` | `ids` ≤50 (as `photos_list(source=trash)` gives them) | `restored`, `not_in_trash` and per id `restored` (read back from the trash) |
 | `photos_upload` | `url` (a public https link) or `data` (base64, ≤10 MiB), `filename`, `album_id` | the new item `{id, url, type, filename, taken_at, tz_known, width, height, uploaded_at}`, `already_in_library`, `size_bytes`, the album afterwards (`added`) |
 | `photos_upload_link` | `album_id` | a one-time upload page for the caller's own account: `{url, expires_at, files_max, file_max_bytes, album, put_example, next_step}` ([Uploading](#uploading)) |
 | `photos_show` | `items` ≤12 `{id, note}`, `title` | a gallery card for the person ([Photo cards](#photo-cards)); the same data as JSON for other clients |
@@ -189,7 +194,8 @@ apply) and `freshness` (`generation`, `session_verified_at`, `served_at`).
 
 `photos_list` sources: `library` (newest first by taken date, archive excluded),
 `archive`, `album`, `favourites` and `recently_added` (newest upload first; both are the web
-app's own filtered views of the search RPC and include archived items). `from_date` /
+app's own filtered views of the search RPC and include archived items), and `trash` (most
+recently deleted first; what `photos_restore` can bring back). `from_date` /
 `to_date` (`YYYY-MM-DD`, library and archive) bound the items' own local dates: the listing
 starts Google's timeline at the end of the range and stops once it has passed the start.
 `media=photos|videos` keeps one kind. A filtered listing reads up to 5 Google pages per call
@@ -293,9 +299,8 @@ Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable
 | `connect_limited` | more than 6 links an hour for one account | give the newest link |
 | `upload_limited` | more than 30 upload links an hour for one account | give the newest link |
 | `fetch_failed` | `photos_upload(url=...)`: the link did not answer, answered with an error, or took too long | nothing added |
-| `outcome_unknown` | a change (album change, or making an uploaded item) failed after it was sent (5xx or network): it is never repeated | read the album, or `photos_list(source=recently_added)`, to see what happened |
-| `refused` | Google refused a change (an album this account cannot edit, an upload it would not take) | nothing changed |
-| `confirm_invalid` | a removal's token is unknown, expired, used, or for other arguments | preview again and ask the person |
+| `outcome_unknown` | a change (album change, upload, trash) failed after it was sent (5xx or network): it is never repeated | read the album, `photos_albums`, `photos_list(source=recently_added)` or `photos_list(source=trash)` to see what happened |
+| `refused` | Google refused a change (an album this account cannot edit, an upload it would not take, items it would not move) | nothing changed |
 
 ## Liveness
 
@@ -308,25 +313,33 @@ the same generation.
 
 ## Safety and Google posture
 
-- **Album changes and uploads only.** Reads go through `GoogleTransport.rpc`, which refuses any
-  RPC id outside `lcxiM EzkLib EWgK9e Z5xsfc snAcKc VrseUb fDcn4b EzwWhf swbisb` (`swbisb`: does
-  the library hold a file with this hash). Changes go through `GoogleTransport.write`, which
-  refuses any outside `OXvT9d E1Cajb laUYf ycV3Nd LjmOue mdpdU` (create an album; add items to
-  an album or a shared one; remove items from an album or a shared one; make an item from an
-  upload) and never retries a request that may have reached Google (`outcome_unknown`,
-  logged). An upload's bytes go through `GoogleTransport.upload_bytes` to Google's upload
+- **Album changes, uploads and the trash only.** Reads go through `GoogleTransport.rpc`, which
+  refuses any RPC id outside `lcxiM EzkLib EWgK9e Z5xsfc snAcKc VrseUb fDcn4b EzwWhf swbisb
+  zy0IHe` (`swbisb`: does the library hold a file with this hash; `zy0IHe`: the trash). Changes
+  go through `GoogleTransport.write`, which refuses any outside `OXvT9d E1Cajb laUYf ycV3Nd
+  LjmOue nV6Qv mdpdU XwAOJf` (create an album; add items to an album or a shared one; remove
+  items from an album or a shared one; delete an album; make an item from an upload; move items
+  to the trash or back) and never retries a request that may have reached Google
+  (`outcome_unknown`, logged). Nothing deletes for good: no builder empties the trash or deletes
+  from it, and `XwAOJf` is built only into the trash and back. An upload's bytes go through `GoogleTransport.upload_bytes` to Google's upload
   endpoint only (`/_/upload/uploadmedia/interactive`, and the session address it answers with,
   which must be the same endpoint); nothing is in the library until `mdpdU`, so a failure there
-  changes nothing. No builder exists for deleting, trashing, archiving, favouriting, editing
+  changes nothing. No builder exists for emptying the trash, archiving, favouriting, editing
   dates, places or descriptions, sharing, the locked folder or downloads; `tests/test_safety.py`
   checks the source for other RPC ids and builders, other hosts and other HTTP libraries.
-- **Removing is confirmed.** `photos_album_remove` first finds the ids in the album's own
-  listing (Google's remove RPC names no album, so a key from another album would act there)
-  and returns a preview and a single-use token, valid 10 minutes, for exactly that album and
-  those ids; only that token removes them. Every change is read back from the album
-  (`added` / `removed` from its counts), counts against `PHOTOS_DAILY_WRITE_BUDGET` (each
-  account's own, 500 a day; an upload counts one) and is appended to `audit.jsonl` in the
-  account's state directory (ids and counts only).
+- **Removing and deleting are the client's to confirm.** `photos_album_remove`,
+  `photos_album_delete` and `photos_delete` are annotated `destructiveHint`, and the
+  instructions tell the model to ask the person first and show what goes; configure your MCP
+  clients to ask before each call of these three (their approval setting per tool). Each acts
+  in one call. `photos_album_remove` touches only the ids the album's own listing holds
+  (Google's remove RPC names no album, so a key from another album would act there);
+  `photos_delete` only the items of this library, by the dedup keys the trash RPC takes;
+  `photos_album_delete` only the account's own albums (a shared one is left to the app, since
+  deleting it changes it for everyone in it). Every change is read back (`added` / `removed` from the
+  album's counts, `in_trash` / `restored` from the trash, `deleted` from the album no longer
+  opening), counts against `PHOTOS_DAILY_WRITE_BUDGET` (each account's own, 500 a day; one per
+  item, upload or album) and is appended to `audit.jsonl` in the account's state directory (ids
+  and counts only).
 - **Hosts:** HTTPS only, `photos.google.com`, `photos.fife.usercontent.google.com`,
   `lh[0-9].googleusercontent.com`. Redirects are followed by hand, at most 3, inside
   that list; sign-in, consent and `/sorry` redirects are classified, never followed. The one
@@ -405,7 +418,7 @@ flows back from photos-mcp to it.
 | `PHOTOS_STATE_DIR` | `/state` | `state.json` (budgets, breaker, dead generation, last error) and `cache/` |
 | `PHOTOS_DAILY_RPC_BUDGET` | 3000 | RPCs plus app-page loads per day |
 | `PHOTOS_DAILY_THUMB_BUDGET` | 2000 | image fetches per day (cache hits are free) |
-| `PHOTOS_DAILY_WRITE_BUDGET` | 500 | changes per account and day (items added or removed, albums created, files uploaded) |
+| `PHOTOS_DAILY_WRITE_BUDGET` | 500 | changes per account and day (items added, removed, trashed or restored, albums created or deleted, files uploaded) |
 | `PHOTOS_UPLOAD_MAX_BYTES` | 2 GiB | the largest file `photos_upload` and upload links take (1 MiB to 10 GiB) |
 | `PHOTOS_BUDGET_TZ` | `UTC` | IANA time zone whose midnight resets the budgets |
 | `PHOTOS_CACHE_MAX_BYTES` | 2 GiB | thumbnail cache, LRU; 0 disables it |
@@ -491,9 +504,10 @@ sign in on Google's own page in their browser, phone or computer.
   own only). The live view works only while the profile is shown signed out on Google's
   sign-in page: a profile that is still signed in is checked, and exported, with nobody
   watching, and an account notice of a signed-in profile ends the window instead of showing it.
-  Ctrl+V (Cmd+V) types the clipboard's text into the window (`src/photos_mcp/paste.js`, a small
-  add-on to noVNC's viewer; up to 1000 characters the window's keyboard has, which covers
-  ASCII); on a phone, noVNC's keyboard button opens the phone's keyboard.
+  Ctrl+V (Cmd+V) types the clipboard's text into the window (a small add-on to noVNC's viewer
+  from [signin-window](https://github.com/benjamin-di/signin-window), the library the sign-in
+  window and its links are built on; up to 1000 characters the window's keyboard has, which
+  covers ASCII); on a phone, noVNC's keyboard button opens the phone's keyboard.
 - **Once Google Photos shows a signed-in account**, the window checks that this account may
   use it (its bound address, or any address no other account here serves), then writes the
   snapshot from the same browser, as `photos-mcp-session browser export` does (it loads the
@@ -599,11 +613,13 @@ every number about the account (see `capture.py`).
 Layout: `src/photos_mcp/` — `server.py` (tools, transports, the account registry),
 `client.py` (tool logic, paging, thumbnails), `transport.py` (HTTP policy), `session.py`
 (snapshot reader, cookies), `session_export.py` (`photos-mcp-session`), `state.py` (budgets,
-breaker), `accounts.py` (further accounts), `connect.py` (sign-in links), `login_client.py`
-(the login service's API), `admin.py`, `config.py` (settings), `errors.py` (error codes),
+breaker), `accounts.py` (further accounts), `connect.py` (sign-in links, on signin-window's
+relay), `login_client.py` (the login service's API: signin-window's client plus the account
+routes), `admin.py`, `config.py` (settings), `errors.py` (error codes),
 `cursors.py`, `cache.py`, `images.py`, `rpc.py` (response parsers), `capture.py` (recorded
 fixtures), `auth.py`, `logs.py`, `vendor/gpwc/` (request framing, read payloads).
-`src/photos_login/` — the login service: `app.py` (API), `windows.py` (sign-in windows),
+`src/photos_login/` — the login service, on signin-window's: `app.py` (API), `windows.py` (the
+sign-in window's runner),
 `window.py` (the browser), `keeper.py`, `profiles.py`. `docs/PAYLOADS.md` maps every RPC and
 field path to its source. `scripts/login_e2e.py` checks sign-in links end to end with real
 browsers and a stand-in page (the release runs it in the login image).

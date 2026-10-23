@@ -22,7 +22,7 @@ Modifications for photos-mcp (2026-10-14):
   `GetAlbumPage` (`snAcKc`), `GetItemInfo` (`VrseUb`), `GetItemInfoExt` (`fDcn4b`) and
   `GetStorageQuota` (`EzwWhf`) remain, plus (photos-mcp 0.5, from the same gpwc commit)
   `GetLibraryPageByUploadedDate` and `GetFavoritesPage`, two filters of the search RPC `EzkLib`, and (photos-mcp
-  0.7) `GetRemoteMatchesByHash` (`swbisb`), which an upload asks first. Every write builder (trash, albums, favourites,
+  0.7) `GetRemoteMatchesByHash` (`swbisb`), which an upload asks first, and (0.8) `GetTrashPage` (`zy0IHe`). Every write builder (trash, albums, favourites,
   sharing, archive, ...) was removed, as were `parser.py` and the
   `parse_response` / `execute` helpers; photos-mcp parses responses in `photos_mcp.rpc`.
 - **Payload ids** follow the web app: `"generic"` for a single RPC, `"1"`, `"2"`, ... in
@@ -35,3 +35,7 @@ sends them only through `GoogleTransport.write`, whose allowlist is exactly thes
 
 Uploads (photos-mcp 0.7) are not from gpwc, which has none: the upload endpoint and `CommitUpload` (`mdpdU`) were
 recorded from photos.google.com's own uploader and live in `photos_mcp/upload.py` (docs/PAYLOADS.md "Uploads").
+
+The trash (photos-mcp 0.8): `trash_payloads.py` holds gpwc's `MoveToTrash` and `RestoreFromTrash` (`XwAOJf`, by dedup
+key), from the same commit. Album deletion (`DeleteAlbum`, `nV6Qv`, in `album_payloads.py`) is in neither gpwc nor
+GPTK: it was recorded from photos.google.com's own "Delete album" (docs/PAYLOADS.md "Deleting").

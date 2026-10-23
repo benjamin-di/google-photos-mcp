@@ -1,9 +1,9 @@
-"""photos-mcp: FastMCP server over Google Photos libraries: find and look at photos, add photos and videos, and
-organise albums.
+"""photos-mcp: FastMCP server over Google Photos libraries: find and look at photos, add photos and videos, move them
+to the trash and back, and organise albums.
 
 It reads a Google session snapshot (``PHOTOS_SESSION_DIR``) and serves MCP over streamable
 HTTP (bearer required) or stdio. Safety boundary (enforced here, in ``transport`` and by
-``tests/test_safety.py``): the only changes are album changes and uploads, every RPC id and host
+``tests/test_safety.py``): the only changes are album changes, uploads and the trash, every RPC id and host
 is allowlisted, Google calls are paced and budgeted, and tool results never carry exception
 text.
 
@@ -77,7 +77,7 @@ LINK = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False
 CREATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 ADD = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 REMOVE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
-# Uploading the same file again adds no copy (Google keeps one).
+# Uploading the same file again adds no copy (Google keeps one); restoring from the trash is the same.
 UPLOAD = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 # Inline upload data (base64): at most this many bytes once decoded. Larger files go through an upload link.
 DATA_MAX_BYTES = 10 * 1024**2
@@ -120,8 +120,9 @@ _ERRORS = "\n".join(f"- {code}: {text}" for code, text in NEXT_STEP.items())
 
 INSTRUCTIONS = f"""\
 Google Photos for the calling person's own account, through the same private web API
-photos.google.com uses: find and look at photos and videos, add photos and videos, and organise
-albums. Nothing here deletes, archives, edits or shares photos.
+photos.google.com uses: find and look at photos and videos, add photos and videos, move them to
+the trash and back, and organise albums. Nothing here empties the trash, archives, edits or shares
+photos.
 
 Flow: photos_search -> photos_contact_sheet -> photos_view, then photos_show for the person.
 1. photos_search(query) uses Google's own search: people (a name the library has
@@ -150,11 +151,9 @@ mobile, web, shared, partnerShared, drive, pc, gmail; android, ios) and original
 
 Albums: photos_album_create(title, ids) makes an album (with up to 50 items);
 photos_album_add(album_id, ids) adds up to 50 items (ids from search or list); photos_album_remove
-takes them out again (they stay in the library) and needs the person's yes: call it first without
-confirm, show the person the preview (album, photos to remove), and only after their explicit yes
-call it again with the same arguments and confirm set to the preview's confirm_token. Its ids are
-the ones photos_list(source=album) gives for that album. Each change is read back from the album
-(added / removed counts) and counts against a daily write budget (photos_status: budgets).
+takes them out again (they stay in the library; its ids are the ones photos_list(source=album)
+gives for that album). Each change is read back from the album (added / removed counts) and
+counts against a daily write budget (photos_status: budgets).
 
 Adding photos and videos: photos_upload_link(album_id) gives a one-time page where the person
 picks photos and videos from their phone or computer; each goes straight into their library (and
@@ -163,6 +162,14 @@ on disk, such as an image you made in a code sandbox (put_example). photos_uploa
 the photo or video at a public https link; photos_upload(data=...) one you have as base64 (up to
 10 MiB). A file the library already holds is not added twice (already_in_library). Each upload
 counts against the write budget; photos_list(source=recently_added) shows what arrived.
+
+Deleting: photos_delete(ids) moves up to 50 photos or videos (ids from search or list) to the
+trash, where Google keeps them 60 days; photos_restore(ids) brings them back, and
+photos_list(source=trash) lists the trash. photos_album_delete(album_id) deletes one of the
+person's own albums (its photos stay in the library; the album cannot be brought back).
+photos_delete, photos_album_delete and photos_album_remove take things away: ask the person
+before calling them, showing exactly what goes (photos_show for photos, the album's title and
+count for an album); their client also asks them to approve each call.
 
 Images: at most 1568 px on the longest edge; originals and downloads are not available here
 (the person opens an item's url to download it).
@@ -452,8 +459,11 @@ def create_server(
     @mcp.tool(annotations=READ)
     async def photos_list(
         source: Annotated[
-            Literal["library", "archive", "album", "favourites", "recently_added"],
-            Field(description="library (default), archive, album, favourites, or recently_added (newest upload first)"),
+            Literal["library", "archive", "album", "favourites", "recently_added", "trash"],
+            Field(
+                description="library (default), archive, album, favourites, recently_added (newest upload first), or "
+                "trash (most recently deleted first)"
+            ),
         ] = "library",
         album_id: Annotated[
             str | None, Field(max_length=128, description="Album id; required iff source=album")
@@ -592,15 +602,42 @@ def create_server(
             list[str],
             Field(min_length=1, max_length=50, description="Item ids as photos_list(source=album) gives them (max 50)"),
         ],
-        confirm: Annotated[
-            str | None, Field(max_length=64, description="The preview's confirm_token, after the person said yes")
-        ] = None,
     ) -> dict[str, Any]:
-        """Take up to 50 items out of an album; they stay in the library. Without confirm: a preview
-        (the album, the items found in it, not_in_album, confirm_token for 10 minutes) and nothing
-        changes. Show it to the person and wait for their explicit yes, then call again with the
-        same album_id and ids and confirm. Returns the album afterwards and removed."""
-        return await call(PhotosService.album_remove, album_id, ids, confirm)
+        """Take up to 50 items out of an album; they stay in the library. Only ids the album's own listing holds are
+        removed (not_in_album: the others). Ask the person first, showing which photos leave the album. Returns the
+        album afterwards and removed."""
+        return await call(PhotosService.album_remove, album_id, ids)
+
+    @mcp.tool(annotations=REMOVE)
+    async def photos_album_delete(
+        album_id: Annotated[str, Field(min_length=8, max_length=128, description="An album id from photos_albums")],
+    ) -> dict[str, Any]:
+        """Delete one of the person's own albums; its photos stay in the library, but the album cannot be brought
+        back. Ask the person first, naming the album and how many photos it holds. Returns the album and deleted
+        (read back: the album no longer opens). Shared albums are deleted or left in the app."""
+        return await call(PhotosService.album_delete, album_id)
+
+    @mcp.tool(annotations=REMOVE)
+    async def photos_delete(
+        ids: Annotated[
+            list[str], Field(min_length=1, max_length=50, description="Item ids from search or list (max 50)")
+        ],
+    ) -> dict[str, Any]:
+        """Move up to 50 photos or videos to the trash, where Google keeps them 60 days (photos_restore brings them
+        back). Ask the person first, showing them the photos (photos_show). Returns trashed, not_found (ids that are
+        not items of this library) and, per id, in_trash (read back from the trash)."""
+        return await call(PhotosService.trash, ids)
+
+    @mcp.tool(annotations=UPLOAD)
+    async def photos_restore(
+        ids: Annotated[
+            list[str],
+            Field(min_length=1, max_length=50, description="Item ids as photos_list(source=trash) gives them (max 50)"),
+        ],
+    ) -> dict[str, Any]:
+        """Bring up to 50 photos or videos back from the trash into the library. Returns restored, not_in_trash and,
+        per id, restored (read back from the trash)."""
+        return await call(PhotosService.restore, ids)
 
     @mcp.tool(annotations=UPLOAD)
     async def photos_upload(

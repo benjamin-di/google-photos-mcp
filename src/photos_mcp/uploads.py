@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import unquote
 
 import anyio.to_thread
+from signin_window.relay import HEADERS, PAGE_HEADERS, Misses
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -36,7 +37,6 @@ from starlette.routing import Route
 from . import accounts
 from .client import PhotosService
 from .config import Settings
-from .connect import HEADERS, PAGE_HEADERS, Misses
 from .errors import PhotosError, invalid
 from .upload import SNIFF_BYTES, Gate, Staging, modified_ms, size_text
 

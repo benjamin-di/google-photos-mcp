@@ -1,6 +1,7 @@
 """Album-change RPC payload builders (gpwc ``payloads.py`` at 651aa268 and Google-Photos-Toolkit ``api.ts``; see
-README.md). Only these changes exist in photos-mcp: create an album, add items to an album or a shared album, remove
-items from an album or a shared album. Nothing deletes, trashes, archives or edits media, and nothing shares.
+README.md), plus ``DeleteAlbum``, recorded from photos.google.com itself. These album changes exist in photos-mcp:
+create an album, add items to an album or a shared album, remove items from an album or a shared album, delete an
+album (its photos stay in the library). Nothing here archives or edits media, and nothing shares.
 """
 
 from .payloads import Payload
@@ -45,3 +46,13 @@ class RemoveItemsFromSharedAlbum(Payload):
             [item_media_keys],
             [[None, None, None, [None, [], []], None, None, None, None, None, None, None, None, None, []]],
         ]
+
+
+class DeleteAlbum(Payload):
+    """``nV6Qv``, as the web app's "Delete album" sends it (recorded 2026-10; neither gpwc nor GPTK has it). The album
+    goes; its photos stay in the library. The trailing 1 is the app's, meaning unknown."""
+
+    def __init__(self, album_media_keys: list[str]):
+        super().__init__()
+        self.rpcid = "nV6Qv"
+        self.data = [None, None, [[key, None, 1] for key in album_media_keys]]

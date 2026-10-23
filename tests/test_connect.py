@@ -8,13 +8,14 @@ import json
 import time
 
 import pytest
+from signin_window import relay as relay_module
+from signin_window.client import STATIC, LoginBusy
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from test_accounts import HEADER, OTHER, PROXY, make_settings, publish, write_meta_default
 
 from photos_mcp import accounts, connect, server
 from photos_mcp.auth import bearer_auth_from_env
-from photos_mcp.login_client import STATIC, LoginBusy
 
 VNC_HTML = b"<!doctype html><html><head><script type=module>import UI from './app/ui.js';</script></head></html>"
 LINK_ENV = {
@@ -35,7 +36,7 @@ class FakeLogin:
         self.states: dict[str, dict] = {}
         self.busy = False
 
-    def start(self, account: str, layout: str, *, email, taken) -> dict:
+    def start(self, layout: str = "desktop", *, account: str, email, taken) -> dict:
         if self.busy:
             raise LoginBusy("busy")
         login_id = f"login-{len(self.started):011d}"
@@ -56,7 +57,10 @@ class FakeLogin:
     def forget(self, account: str) -> None:
         self.forgotten.append(account)
 
-    def static(self, path: str) -> tuple[int, bytes, str]:
+    def result(self, login_id: str) -> None:
+        return None  # the login service never hands a session over
+
+    def static(self, path: str, window_id: str | None = None) -> tuple[int, bytes, str]:
         if not STATIC.match(path):
             return 404, b"", "text/plain"
         if path == "vnc.html":
@@ -84,8 +88,19 @@ def settings(tmp_path):
     return settings
 
 
+FLOWS: list[connect.ConnectFlow] = []
+
+
+class RecordedFlow(connect.ConnectFlow):
+    def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(*args, **kwargs)
+        FLOWS.append(self)
+
+
 @pytest.fixture
-def http(settings, login):
+def http(settings, login, monkeypatch):
+    FLOWS.clear()
+    monkeypatch.setattr(server, "ConnectFlow", RecordedFlow)
     auth = bearer_auth_from_env({"MCP_BEARER_TOKEN": PROXY})
     registry = server.Accounts.from_settings(settings)
     app = server.create_server(registry, auth=auth, login=login).http_app(**server.HTTP_OPTIONS)
@@ -147,7 +162,7 @@ def test_a_replaced_link_closes_its_window_and_opens_no_more(http, login):
 
 
 def test_links_are_rate_limited_per_account(http):
-    for _ in range(connect.LINKS_PER_HOUR):
+    for _ in range(relay_module.Relay.__init__.__kwdefaults__["links_per_hour"]):
         tool(http, "photos_connect", "second")
     assert tool(http, "photos_connect", "second")["error"]["code"] == "connect_limited"
 
@@ -188,7 +203,7 @@ def test_the_mcp_endpoint_still_needs_the_bearer(http):
 
 def test_guessing_ids_is_slowed_down(http):
     headers = {"X-Forwarded-For": "203.0.113.7"}
-    for _ in range(connect.MISSES_PER_ADDRESS):
+    for _ in range(relay_module.MISSES_PER_ADDRESS):
         assert http.get("/connect/" + "Q" * 32 + "/state", headers=headers).status_code == 404
     assert http.get("/connect/" + "Q" * 32 + "/state", headers=headers).status_code == 429
     path = link_path(tool(http, "photos_connect", "second"))
@@ -199,7 +214,8 @@ def test_guessing_ids_is_slowed_down(http):
 def test_the_link_expires_and_closes_its_window(http, login, monkeypatch):
     path = link_path(tool(http, "photos_connect", "second"))
     assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] == "starting"
-    monkeypatch.setattr(connect, "LINK_TTL", -1)
+    for link in [x for flow in FLOWS for x in flow.relay.links("second")]:
+        link.expires = 0  # past
     assert http.get(path).status_code == 404
     assert http.post(path + "/start", json={}).status_code == 404
     wait_for(lambda: login.closed)
@@ -214,7 +230,7 @@ def test_a_sign_in_binds_the_links_account_to_the_address_it_proved(http, login,
     assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] == "starting"
     # The login service is told which address it may accept: any but the ones other accounts serve.
     assert login.started == [{"account": "second", "layout": "phone", "email": None, "taken": ["owner@example.com"]}]
-    assert http.get(path + "/state").json() == {"state": "waiting", "host": "accounts.google.com", "email": None}
+    assert http.get(path + "/state").json() == {"state": "waiting", "host": "accounts.google.com"}
     login.end("login-00000000000", "saving")
     assert http.get(path + "/state").json()["state"] == "saving"
     publish(settings, "second", OTHER)  # the login service writes the snapshot itself
@@ -234,12 +250,16 @@ def test_a_sign_in_binds_the_links_account_to_the_address_it_proved(http, login,
     assert login.started[-1]["email"] == OTHER
 
 
-@pytest.mark.parametrize("ending", ["wrong_account", "in_use", "empty_library", "failed", "expired", "cancelled"])
-def test_a_refused_or_failed_sign_in_binds_nothing(http, login, settings, ending):
+@pytest.mark.parametrize(
+    ("ending", "shown"),
+    [("wrong_account", "wrong_account"), ("in_use", "in_use"), ("empty_library", "empty_library"),
+     ("failed", "failed"), ("cancelled", "cancelled"), ("expired", "failed")],  # a window past its time: try again
+)  # fmt: skip
+def test_a_refused_or_failed_sign_in_binds_nothing(http, login, settings, ending, shown):
     path = link_path(tool(http, "photos_connect", "second"))
     http.post(path + "/start", json={})
     login.end("login-00000000000", ending)
-    assert http.get(path + "/state").json()["state"] == ending
+    assert http.get(path + "/state").json()["state"] == shown
     assert accounts.load(settings, "second").email is None
 
 
@@ -279,7 +299,7 @@ def test_busy_cancel_and_the_start_limit(http, login):
     assert http.post(path + "/cancel").status_code == 204
     assert login.closed == ["login-00000000000"]
     assert http.get(path + "/state").json()["state"] == "cancelled"
-    for _ in range(connect.MAX_STARTS - 2):
+    for _ in range(relay_module.Relay.__init__.__kwdefaults__["max_starts"] - 2):
         http.post(path + "/start", json={})
         http.post(path + "/cancel")
     assert http.post(path + "/start", json={}).json()["state"] == "cancelled"  # used up
@@ -293,7 +313,7 @@ def test_the_viewer_is_novnc_plus_the_paste_add_on(http):
     path = link_path(tool(http, "photos_connect", "second"))
     page = http.get(path + "/novnc/vnc.html?autoconnect=1")
     assert page.status_code == 200 and page.headers["x-frame-options"] == "SAMEORIGIN"
-    assert page.content == VNC_HTML.replace(b"</head>", connect.PASTE_TAG + b"\n</head>")
+    assert page.content == VNC_HTML.replace(b"</head>", relay_module.PASTE_TAG + b"\n</head>")
     paste = http.get(path + "/novnc/paste.js")
     assert paste.status_code == 200 and paste.headers["content-type"].startswith("text/javascript")
     for bad in ("/novnc/../vnc.html", "/novnc/.hidden", "/novnc/a/../../x"):
@@ -319,12 +339,3 @@ def test_the_live_view_ends_with_the_sign_in_page(http, login):
     http.get(path + "/state")
     with pytest.raises(WebSocketDisconnect), http.websocket_connect(path + "/vnc") as ws:
         ws.receive_bytes()
-
-
-def test_the_paste_add_on_is_the_shared_one():
-    source = connect.PASTE_JS.decode()
-    assert 'import UI from "./app/ui.js"' in source  # the same UI singleton vnc.html loads
-    assert "console." not in source and "localStorage" not in source and "fetch(" not in source
-    assert "MAX_CHARS = 1000" in source and "PACE_MS = 20" in source
-    keydown = source[source.index('addEventListener("keydown"') : source.index('addEventListener("paste"')]
-    assert "stopPropagation()" in keydown and "preventDefault()" not in keydown  # the browser must still paste

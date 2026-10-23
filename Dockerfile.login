@@ -5,7 +5,18 @@
 # person's language). It never automates the sign-in (tests/test_login_service.py).
 FROM ghcr.io/astral-sh/uv:0.9.26@sha256:9a23023be68b2ed09750ae636228e903a54a05ea56ed03a934d00fe9fbeded4b AS uv
 
-FROM python:3.12.13-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS browser-node
+
+FROM python:3.12.14-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+
+COPY runtime-installer.py /tmp/runtime-installer.py
+RUN python /tmp/runtime-installer.py && rm /tmp/runtime-installer.py
+
+
+# Security-patched Node for the browser driver's JavaScript transport.
+COPY --from=browser-node /usr/local/bin/node /usr/local/bin/browser-node
+ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/browser-node
+RUN test "$(browser-node --version)" = v24.22.1
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,7 +28,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY --from=uv /uv /usr/local/bin/
 
-RUN apt-get update \
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -58,6 +69,9 @@ RUN uv pip install --system --compile-bytecode --no-deps . \
       && install -m 0644 src/photos_login/chromium-policy.json "$dir/photos-mcp-login.json"; \
     done \
  && rm -rf /app/src
+
+RUN python -c "from pathlib import Path; import patchright; p = Path(patchright.__file__).parent / 'driver' / 'node'; p.unlink(); p.symlink_to('/usr/local/bin/browser-node')" \
+ && python -m patchright --version
 
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown

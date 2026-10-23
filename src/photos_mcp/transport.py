@@ -15,7 +15,7 @@
   account mismatch, marks a generation dead; a bare 401 and a consent redirect are
   reported, not dead; anything else unproven is ``upstream_error``.
 * RPC id allowlists and host allowlist (HTTPS only): ``rpc`` sends only the read RPCs; ``write``
-  sends only the changes in ``WRITE_RPC_ALLOWLIST`` (album changes, making an uploaded item) and never
+  sends only the changes in ``WRITE_RPC_ALLOWLIST`` (album changes, making an uploaded item, the trash) and never
   retries a request that may have reached Google (``outcome_unknown``). ``upload_bytes`` sends a file
   to Google's upload endpoint (``upload.UPLOAD_PATH``) and nowhere else, one file at a time per slot of
   its own pacer (2 slots), so a long upload never holds the RPC slot. Redirects are followed by hand,
@@ -50,12 +50,15 @@ from .vendor.gpwc.payloads import Payload
 
 log = logging.getLogger(__name__)
 
-# Reads, and swbisb: whether the library already holds a file (by its SHA-1), which an upload asks first.
-RPC_ALLOWLIST = frozenset({"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf", "swbisb"})
+# Reads, swbisb (whether the library already holds a file, by its SHA-1, which an upload asks first) and zy0IHe (the
+# trash).
+RPC_ALLOWLIST = frozenset(
+    {"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf", "swbisb", "zy0IHe"}
+)
 # Album changes: create an album (OXvT9d), add items to an album (E1Cajb) or a shared album (laUYf), remove items
-# from an album (ycV3Nd) or a shared album (LjmOue); and make a media item from an upload (mdpdU). Nothing here
-# deletes, trashes, archives, edits or shares media.
-WRITE_RPC_ALLOWLIST = frozenset({"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue", "mdpdU"})
+# from an album (ycV3Nd) or a shared album (LjmOue), delete an album (nV6Qv); make a media item from an upload (mdpdU);
+# move items to the trash or back (XwAOJf). Nothing here empties the trash, archives, edits or shares media.
+WRITE_RPC_ALLOWLIST = frozenset({"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue", "nV6Qv", "mdpdU", "XwAOJf"})
 PAGE_HOST = "photos.google.com"
 IMAGE_HOSTS = re.compile(r"^(photos\.fife\.usercontent\.google\.com|lh[0-9]\.googleusercontent\.com)$")
 PHOTOS_URL = "https://photos.google.com/"

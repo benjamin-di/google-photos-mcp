@@ -63,6 +63,15 @@ class GetRemoteMatchesByHash(Payload):
         self.data = [hashes, None, 3, 0]
 
 
+class GetTrashPage(Payload):
+    """The trash, most recently deleted first: ``[items, next_page_id]`` with items in the library-page layout."""
+
+    def __init__(self, page_id: str | None = None):
+        super().__init__()
+        self.rpcid = "zy0IHe"
+        self.data = [page_id]
+
+
 class GetItemInfo(Payload):
     def __init__(self, media_key: str, album_media_key: str | None = None, auth_key: str | None = None):
         super().__init__()

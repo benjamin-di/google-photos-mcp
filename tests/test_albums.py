@@ -1,5 +1,5 @@
 """Album changes: create, add and remove send exactly the album RPCs, read the outcome back from the album, count
-against the daily write budget and the audit log; a removal is previewed first and needs its single-use token; the
+against the daily write budget and the audit log; a removal touches only the ids the album's own listing holds; the
 transport never repeats a change that may have reached Google."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 from conftest import BATCH, PAGE, FakeTransport, all_fixtures, app_page, make_transport, status
 
 from photos_mcp.cache import ThumbCache
-from photos_mcp.client import CONFIRM_TTL, PhotosService
+from photos_mcp.client import PhotosService
 from photos_mcp.cursors import CursorStore
 from photos_mcp.errors import PhotosError
 from photos_mcp.vendor.gpwc import album_payloads, payloads
@@ -137,37 +137,17 @@ def test_add_reads_the_outcome_back_and_uses_the_shared_rpc_for_shared_albums(sv
     assert shared["album"]["shared"] is True and shared["added"] == 1
 
 
-def test_remove_is_previewed_then_confirmed_once(svc, google):
-    preview = svc.album_remove(ALBUM, [key(2), key(5), key(8)])
-    assert preview["preview"] is True and google.writes == []
-    assert [i["id"] for i in preview["remove"]] == [key(2), key(5)]  # key(5) is on the album's second page
-    assert preview["not_in_album"] == [key(8)]
-    token = preview["confirm_token"]
-    # The token is for exactly this album and these ids.
-    for album, ids in ((SHARED, [key(2), key(5), key(8)]), (ALBUM, [key(2), key(5)])):
-        with pytest.raises(PhotosError) as caught:
-            svc.album_remove(album, ids, confirm=token)
-        assert caught.value.code == "confirm_invalid"
-    preview = svc.album_remove(ALBUM, [key(2), key(5), key(8)])  # a wrong use spent the old token
-    done = svc.album_remove(ALBUM, [key(8), key(5), key(2)], confirm=preview["confirm_token"])
-    assert google.writes == [[("ycV3Nd", [[key(2), key(5)]])]]  # only what the preview found in this album
-    assert done["removed"] == 2 and done["album"]["count"] == 3
-    with pytest.raises(PhotosError) as caught:
-        svc.album_remove(ALBUM, [key(2), key(5), key(8)], confirm=preview["confirm_token"])
-    assert caught.value.code == "confirm_invalid"  # single use
-
-
-def test_a_token_expires(svc, clock):
-    token = svc.album_remove(ALBUM, [key(1)])["confirm_token"]
-    clock.now += CONFIRM_TTL
-    with pytest.raises(PhotosError) as caught:
-        svc.album_remove(ALBUM, [key(1)], confirm=token)
-    assert caught.value.code == "confirm_invalid"
+def test_remove_takes_out_only_what_the_album_holds(svc, google):
+    done = svc.album_remove(ALBUM, [key(8), key(5), key(2)])
+    assert google.writes == [
+        [("ycV3Nd", [[key(5), key(2)]])]
+    ]  # key(5) is on the album's second page; key(8) is not in it
+    assert done["removed"] == 2 and done["album"]["count"] == 3 and done["not_in_album"] == [key(8)]
+    assert [(a["action"], a["items"]) for a in audit(svc)] == [("remove", 2)]
 
 
 def test_removing_from_a_shared_album_names_the_album(svc, google):
-    token = svc.album_remove(SHARED, [key(9)])["confirm_token"]
-    svc.album_remove(SHARED, [key(9)], confirm=token)
+    svc.album_remove(SHARED, [key(9)])
     assert google.writes[-1][0][0] == "LjmOue" and google.writes[-1][0][1][:2] == [[SHARED], [[key(9)]]]
 
 

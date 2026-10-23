@@ -339,7 +339,7 @@ def test_status_never_calls_google(service, transport):
     status = service.status()
     assert transport.calls == [] and transport.gets == []
     assert status["session"]["state"] == "ok" and status["session"]["generation"] == 7
-    assert status["changes"] == ["albums", "uploads"]
+    assert status["changes"] == ["albums", "uploads", "trash"]
     assert status["budgets"]["rpc_left"] == 3000 and status["breaker"]["open"] is False
     service.record_error("blocked")
     service.state.trip_breaker()

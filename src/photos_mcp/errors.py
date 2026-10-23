@@ -61,10 +61,6 @@ NEXT_STEP: dict[str, str] = {
         "Google refused the change and nothing was changed (for example an album this account cannot edit). Tell "
         "the person; do not retry."
     ),
-    "confirm_invalid": (
-        "This confirm token is unknown, expired, already used, or for other arguments. Call the tool again "
-        "without confirm for a fresh preview and ask the person before confirming."
-    ),
     "upload_limited": (
         "Too many upload links were made for this account in the last hour. Give the person the newest link, or try "
         "again later."

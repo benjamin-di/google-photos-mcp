@@ -1,9 +1,10 @@
-"""The login service's API. Only photos-mcp holds its bearer; a window's live view also needs that window's token.
+"""The login service's API (signin-window's service). Only photos-mcp holds its bearer; a window's live view also needs
+that window's token, and there is no direct view page.
 
 POST   /logins                 {"account", "layout", "email", "taken"} -> 201 {id, state, view_token, ...} | 503 busy
 GET    /logins/{id}            -> {id, account, state, host, layout} (+ "email" once connected)
-DELETE /logins/{id}            -> 204 (closes the window)
-WS     /logins/{id}/vnc?t=     -> the window's remote-desktop stream (RFB), for noVNC
+DELETE /logins/{id}            -> 204 (closes the window, unless it is saving a finished sign-in)
+WS     /logins/{id}/vnc?t=     -> the window's remote-desktop stream (RFB), for noVNC, while Google's page is up
 POST   /accounts/{id}/refresh  -> 202 | 404 (not kept): refresh that account's snapshot soon
 DELETE /accounts/{id}          -> 204: delete its browser profile and snapshot
 GET    /novnc/...              -> noVNC's own files (the viewer)                                   (open)
@@ -15,55 +16,29 @@ It never returns a session: snapshots go only to PHOTOS_LOGIN_SESSIONS, which ph
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import hmac
 import logging
 import os
 import threading
 from pathlib import Path
+from typing import Any
 
+from signin_window.service import Windows
+from signin_window.service import build_app as service_app
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
-from starlette.types import ASGIApp, Receive, Scope, Send
-from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.routing import Route
 
 from photos_mcp.accounts import valid_id
 
 from .keeper import Keeper
 from .profiles import Paths
-from .window import PolicyMissing, policy_installed
-from .windows import VIEWABLE, Busy, Windows
+from .window import policy_installed
+from .windows import SignIn
 
 log = logging.getLogger("photos-login")
 
 MAX_TAKEN = 100
-
-
-class BearerOnly:
-    """Every route but /health and /novnc needs the bearer, checked before any WebSocket handshake too."""
-
-    def __init__(self, app: ASGIApp, token: str) -> None:
-        self.app, self.expected = app, f"Bearer {token}".encode()
-
-    @staticmethod
-    def _open(scope: Scope) -> bool:
-        path = scope.get("path") or ""
-        return scope["type"] == "http" and (path == "/health" or path.startswith("/novnc/"))
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] in ("http", "websocket") and not self._open(scope):
-            given = dict(scope.get("headers") or []).get(b"authorization", b"")
-            if not hmac.compare_digest(given, self.expected):
-                if scope["type"] == "websocket":
-                    await send({"type": "websocket.close", "code": 4401})
-                else:
-                    await Response(status_code=401)(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
 
 
 def _emails(raw: object) -> list[str] | None:
@@ -77,48 +52,25 @@ def _emails(raw: object) -> list[str] | None:
     return out
 
 
-def build_app(windows: Windows, keeper: Keeper, *, token: str, novnc_dir: Path) -> Starlette:
-    async def health(_: Request) -> JSONResponse:
-        return JSONResponse({"status": "healthy"})
+def start_params(require_policy: bool):  # type: ignore[no-untyped-def]
+    """A start names a valid account, the only address it may sign in as (or none) and the addresses others hold."""
 
-    async def start(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except ValueError:
-            body = None
-        if not isinstance(body, dict):
-            return JSONResponse({"error": "invalid"}, status_code=400)
-        account, layout, email = body.get("account"), body.get("layout"), body.get("email")
+    def params(body: dict[str, Any]) -> dict[str, Any]:
+        account, email = body.get("account"), body.get("email")
         taken = _emails(body.get("taken", []))
         if not valid_id(account) or taken is None or (email is not None and not _emails([email])):
-            return JSONResponse({"error": "invalid"}, status_code=400)
-        try:
-            login = await asyncio.to_thread(
-                windows.start,
-                account,
-                layout if layout in ("phone", "desktop") else "desktop",
-                email=email.strip().lower() if isinstance(email, str) else None,
-                taken=taken,
-            )
-        except Busy:
-            return JSONResponse({"error": "busy"}, status_code=503)
-        except PolicyMissing:
+            raise ValueError("invalid")
+        if require_policy and not policy_installed():
             log.error("no sign-in window: the managed Chromium policy is not installed (window.POLICY_DIRS)")
-            return JSONResponse({"error": "policy"}, status_code=500)
-        except RuntimeError:
-            return JSONResponse({"error": "display"}, status_code=500)
-        return JSONResponse({**login.public(), "view_token": login.view_token}, status_code=201)
+            raise ValueError("policy")
+        email = email.strip().lower() if isinstance(email, str) else None
+        return {"account": account, "key": account, "email": email, "taken": taken}
 
-    async def state(request: Request) -> JSONResponse:
-        login = windows.get(request.path_params["id"])
-        if login is None:
-            return JSONResponse({"error": "unknown"}, status_code=404)
-        return JSONResponse(login.public())
+    return params
 
-    async def close(request: Request) -> Response:
-        windows.close(request.path_params["id"])
-        return Response(status_code=204)
 
+def build_app(windows: Windows, keeper: Keeper, paths: Paths, browser_lock: threading.Lock, *, token: str,
+              novnc_dir: Path, require_policy: bool = True) -> Starlette:  # fmt: skip
     async def refresh(request: Request) -> Response:
         account = request.path_params["account"]
         if not valid_id(account) or not await asyncio.to_thread(keeper.request, account):
@@ -129,79 +81,34 @@ def build_app(windows: Windows, keeper: Keeper, *, token: str, novnc_dir: Path) 
         account = request.path_params["account"]
         if not valid_id(account):
             return JSONResponse({"error": "unknown"}, status_code=404)
-        windows.close_account(account)
+        await windows.close_key(account)
 
         def delete() -> bool:
             # Not while its window or a refresh holds the browser on that profile.
-            if not windows.browser_lock.acquire(timeout=120):
+            if not browser_lock.acquire(timeout=120):
                 return False
             try:
-                windows.paths.forget(account)
+                paths.forget(account)
                 return True
             finally:
-                windows.browser_lock.release()
+                browser_lock.release()
 
         if not await asyncio.to_thread(delete):
             return JSONResponse({"error": "busy"}, status_code=503)
         log.info("account %s forgotten: browser profile and snapshot deleted", account)
         return Response(status_code=204)
 
-    async def vnc(ws: WebSocket) -> None:
-        # Only while Google's sign-in page is up: the window first checks (and at the end exports from) a profile
-        # that may be signed in, and nobody, the link's holder included, may watch or steer that.
-        login = windows.get(ws.path_params["id"])
-        if login is None or not login.view_ok(ws.query_params.get("t", "")) or login.state != VIEWABLE:
-            await ws.close(code=4404)
-            return
-        await ws.accept(subprotocol="binary" if "binary" in ws.scope.get("subprotocols", []) else None)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", login.vnc_port)
-        except OSError:
-            await ws.close(code=1011)
-            return
-
-        async def upstream() -> None:
-            try:
-                while True:
-                    message = await ws.receive()
-                    if message["type"] == "websocket.disconnect":
-                        return
-                    writer.write(message.get("bytes") or (message.get("text") or "").encode())
-                    await writer.drain()
-            except (WebSocketDisconnect, ConnectionError):
-                return
-
-        async def downstream() -> None:
-            try:
-                while data := await reader.read(65536):
-                    await ws.send_bytes(data)
-            except (WebSocketDisconnect, ConnectionError, RuntimeError):
-                return
-
-        async def watch() -> None:
-            while login.state == VIEWABLE:
-                await asyncio.sleep(0.25)
-
-        tasks = [asyncio.create_task(upstream()), asyncio.create_task(downstream()), asyncio.create_task(watch())]
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in tasks:
-            task.cancel()
-        writer.close()
-        with contextlib.suppress(RuntimeError):
-            await ws.close(code=4404)
-
-    routes = [
-        Route("/health", health),
-        Route("/logins", start, methods=["POST"]),
-        Route("/logins/{id}", state, methods=["GET"]),
-        Route("/logins/{id}", close, methods=["DELETE"]),
-        WebSocketRoute("/logins/{id}/vnc", vnc),
-        Route("/accounts/{account}/refresh", refresh, methods=["POST"]),
-        Route("/accounts/{account}", forget, methods=["DELETE"]),
-    ]
-    if novnc_dir.is_dir():
-        routes.append(Mount("/novnc", app=StaticFiles(directory=novnc_dir)))
-    return Starlette(routes=routes, middleware=[Middleware(BearerOnly, token=token)])
+    return service_app(
+        windows,
+        token=token,
+        novnc_dir=novnc_dir,
+        start_params=start_params(require_policy),
+        routes=[
+            Route("/accounts/{account}/refresh", refresh, methods=["POST"]),
+            Route("/accounts/{account}", forget, methods=["DELETE"]),
+        ],
+        direct_view=False,
+    )
 
 
 def _int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -235,13 +142,12 @@ def main() -> None:
     if not unmanaged and not policy_installed():
         log.error("the managed Chromium policy is not installed: sign-in windows stay closed (window.POLICY_DIRS)")
     windows = Windows(
-        paths,
-        browser_lock,
+        SignIn(paths, require_policy=not unmanaged),
         slots=1,
         minutes=_int("PHOTOS_LOGIN_MINUTES", 20, 5, 60),
         xvfb=xvfb,
         x11vnc=os.environ.get("PHOTOS_LOGIN_X11VNC") or "x11vnc",
-        require_policy=not unmanaged,
+        lock=browser_lock,
     )
     keeper = Keeper(
         paths,
@@ -251,5 +157,5 @@ def main() -> None:
     )
     threading.Thread(target=keeper.run, args=(threading.Event(),), daemon=True, name="keeper").start()
     novnc = Path(os.environ.get("PHOTOS_LOGIN_NOVNC") or "/opt/novnc")
-    app = build_app(windows, keeper, token=token, novnc_dir=novnc)
+    app = build_app(windows, keeper, paths, browser_lock, token=token, novnc_dir=novnc, require_policy=not unmanaged)
     uvicorn.run(app, host="0.0.0.0", port=_int("PORT", 8080, 1, 65535), log_level="warning")

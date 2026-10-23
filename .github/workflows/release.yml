@@ -127,7 +127,7 @@ jobs:
           docker run --rm --network none --entrypoint sh "$candidate" -c '
             set -e
             [ "$(id -u)" = 1000 ]
-            python -c "import photos_login.app, photos_login.windows, photos_login.window, photos_login.keeper, patchright"
+            python -c "import photos_login.app, photos_login.windows, photos_login.window, photos_login.keeper, signin_window.service, patchright"
             command -v Xvfb >/dev/null && command -v x11vnc >/dev/null
             [ -f /opt/novnc/vnc.html ] && [ -f /opt/novnc/core/rfb.js ]'
           rc=0

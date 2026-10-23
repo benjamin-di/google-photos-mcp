@@ -5,7 +5,8 @@
 > `photos_albums`, `get_album` → `photos_list(source="album")`, `get_media_info` →
 > `photos_get`, `get_media` → `photos_view` / `photos_contact_sheet`.
 > `download_media` and `get_storage_quota` are gone (no tool); uploads (`photos_upload`,
-> `photos_upload_link`) are photos-mcp's own, see "Uploads". gpwc is vendored under
+> `photos_upload_link`) are photos-mcp's own, see "Uploads"; deleting (`photos_delete`, `photos_restore`,
+> `photos_album_delete`) is in "Deleting". gpwc is vendored under
 > `src/photos_mcp/vendor/gpwc/`; the transport now uses curl_cffi, not `requests`.
 > RPC ids, payloads and field paths below are current; pacing, error handling and
 > caching follow README.md, which is authoritative where they differ.
@@ -224,6 +225,22 @@ app (2026-10, build `boq_photosuiserver_20261019`) with a small synthetic PNG; t
 Album placement is a separate change (`E1Cajb` / `laUYf`, as for `photos_album_add`). After an
 upload the app also refreshed its views (`rJ0tlb`, `dIx4uf`, `Z5xsfc`, `EzwWhf`, …); photos-mcp
 only drops its cached pages.
+
+## Deleting
+
+* **Trash:** `XwAOJf` with `[null, 1, [dedup_key, …], 3]` moves items to the trash and
+  `[null, 3, [dedup_key, …], 2]` brings them back (gpwc `payloads.MoveToTrash` /
+  `RestoreFromTrash`, `payloads.py` L163-180; GPTK `moveItemsToTrash` / `restoreFromTrash`,
+  `api.ts` L235-257). They take **dedup keys**, not media keys: photos-mcp reads them with
+  `VrseUb` (`data[0][3]`) for the preview, and from the trash listing for a restore. The trash
+  is `zy0IHe` with `[page_id]`, answering `[items, next_page_id]` with items in the library-page
+  layout (gpwc `GetTrashPage`, `payloads.py` L310-325, `parser.TrashPage`; GPTK
+  `getTrashItems`, `api.ts` L203-217), most recently deleted first. Google keeps trashed items
+  60 days; emptying the trash or deleting from it is not built.
+* **Album:** `nV6Qv` with `[null, null, [[album_key, null, 1]]]` answers `[]` and deletes the
+  album; its photos stay in the library. Neither source has it: recorded from photos.google.com's
+  "Delete album" (the album's "More options" menu, then "Delete"; 2026-10). The app then reloaded
+  the albums list (`Z5xsfc`). Afterwards `snAcKc` for that album answers without data.
 
 ## Not available from the web API (as far as these sources go)
 

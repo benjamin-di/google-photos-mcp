@@ -9,8 +9,8 @@ lock-consistency check (`requirements-runtime.lock` must equal `uv export` of `u
 Tests never reach Google: transport tests script HTTP responses,
 `tests/test_curl_sender.py` uses a local server, and `photos-mcp-session`'s browser
 commands are tested through their pure parts. `tests/test_safety.py` is the boundary of what
-photos-mcp may do to a library (reads, and album changes and uploads through `GoogleTransport.write` and
-`upload_bytes` only; the one non-Google request is the guarded link fetch in `fetch.py`):
+photos-mcp may do to a library (reads, and album changes, uploads and the trash through `GoogleTransport.write`
+and `upload_bytes` only, never emptying the trash; the one non-Google request is the guarded link fetch in `fetch.py`):
 a new RPC id, host or payload builder is a deliberate change there, never a side effect.
 
 The session snapshot format (README "Session snapshot", `src/photos_mcp/session.py`,
@@ -26,8 +26,9 @@ it statically). It never returns a session over its API. It holds every further 
 profile and snapshot, so its window must stay locked down: the managed Chromium policy
 (`chromium-policy.json`; DevTools stays allowed in it because `DeveloperToolsAvailability=2`
 also closes the pipe the window is driven through), the top-level page allowlist, and the live
-view only in state `waiting`. `scripts/login_e2e.py` checks the policy in the image. `src/photos_mcp/paste.js` is shared
-verbatim with sibling projects that use the same noVNC sign-in window: change it there too.
+view only in state `waiting`. `scripts/login_e2e.py` checks the policy in the image. The windows' service, the sign-in
+links' relay and the paste add-on come from [signin-window](https://github.com/benjamin-di/signin-window): fix them
+there; this repository holds Google's window, the runner and what a sign-in binds.
 Browser-level behaviour is covered by `scripts/login_e2e.py`, which the release runs in the
 login image (a stand-in page, never Google).
 

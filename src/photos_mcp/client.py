@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import logging
 import re
-import secrets
 import threading
 import time
 from collections import OrderedDict
@@ -29,7 +28,7 @@ from .session import Snapshot
 from .state import StateStore
 from .transport import RpcResult
 from .upload import CommitUpload, Staged, parse_created, parse_matches
-from .vendor.gpwc import album_payloads, payloads
+from .vendor.gpwc import album_payloads, payloads, trash_payloads
 from .vendor.gpwc.payloads import Payload
 
 log = logging.getLogger(__name__)
@@ -69,7 +68,7 @@ CANARY_PX = 256
 PHOTO_URL = "https://photos.google.com/photo/{}"
 ALBUM_URL = "https://photos.google.com/album/{}"
 ALBUM_PHOTO_URL = "https://photos.google.com/album/{}/photo/{}"
-LIST_SOURCES = ("library", "archive", "album", "favourites", "recently_added")
+LIST_SOURCES = ("library", "archive", "album", "favourites", "recently_added", "trash")
 MEDIA = ("all", "photos", "videos")
 # A filtered listing (media type, date range) reads up to this many Google pages per call to find matches.
 FILTER_TARGET = 100
@@ -80,12 +79,16 @@ TZ_SLACK_MS = 14 * 3_600_000
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 MAX_YEARS = 20
 MAX_PER_YEAR = 20
-# Album changes: at most this many items per call (Google's own limit), a title this long, a remove's confirm token
-# this long, and this many pages of an album searched for the items to remove.
+# Album changes: at most this many items per call (Google's own limit), a title this long, and this many pages of an
+# album searched for the items to remove.
 ALBUM_ITEMS_MAX = 50
 ALBUM_TITLE_MAX = 200
-CONFIRM_TTL = 600
 ALBUM_SCAN_PAGES = 20
+# Deleting: at most this many items per call, looked up this many to a request, and this many trash pages searched for
+# them afterwards (and for the items to restore).
+TRASH_MAX = 50
+INFO_CHUNK = 25
+TRASH_SCAN_PAGES = 10
 SHOW_MAX = 12
 SHOW_PX = 320
 DETAILS_MAX = 20
@@ -110,17 +113,6 @@ class ItemMeta:
     thumb_url: str | None
     is_video: bool
     taken_at: str | None
-
-
-@dataclass(frozen=True)
-class _Removal:
-    """A previewed removal: what its confirm token allows, exactly."""
-
-    album: str
-    requested: tuple[str, ...]
-    found: tuple[str, ...]
-    shared: bool
-    created: float
 
 
 @dataclass(frozen=True)
@@ -293,7 +285,6 @@ class PhotosService:
         self._album_auth: dict[str, str | None] = {}
         self._extras: dict[str, Any] = {}  # per scope: the latest page's extra (album title/count)
         self._album_shared: dict[str, bool] = {}
-        self._removals: dict[str, _Removal] = {}
         self._canary_lock = threading.Lock()
         # (checked_at, generation checked, ok, code)
         self._canary: tuple[float, int | None, bool, str | None] | None = None
@@ -346,7 +337,7 @@ class PhotosService:
         media = check_media(media)
         self._check_details(details, limit)
         if source not in LIST_SOURCES:
-            raise invalid("source must be library, archive, album, favourites or recently_added")
+            raise invalid("source must be library, archive, album, favourites, recently_added or trash")
         if (source == "album") != (album_id is not None):
             raise invalid("album_id is required for source=album and only then")
         dated = from_date is not None or to_date is not None
@@ -380,6 +371,17 @@ class PhotosService:
             if album:
                 result["album"] = _compact({**album, "url": ALBUM_URL.format(key)})
             return self._with_details(result, details)
+
+        if source == "trash":
+
+            def fetch_trash(token: str | None) -> _Page:
+                page = rpc.parse_library_page(self._one(payloads.GetTrashPage(page_id=token), required=True))
+                return _Page(page.items, page.next_token)
+
+            fetch = self._filtered(fetch_trash, keep) if media != "all" else fetch_trash
+            items, next_cursor, coverage = self._paged(scope_of(source, media), cursor, limit, fetch)
+            coverage["archive_included"] = True
+            return self._with_details(self._listing(items, next_cursor, coverage), details)
 
         if source in ("favourites", "recently_added"):
             builder = payloads.GetFavoritesPage if source == "favourites" else payloads.GetLibraryPageByUploadedDate
@@ -615,62 +617,119 @@ class PhotosService:
             "freshness": self._freshness(),
         }
 
-    def album_remove(self, album_id: str, ids: list[str], confirm: str | None = None) -> dict[str, Any]:
-        """Remove up to 50 items from an album (they stay in the library). Without ``confirm``: a preview of
-        which of the ids are in the album, and a single-use confirm token for exactly these arguments. With it:
-        the removal, read back from the album."""
+    def album_remove(self, album_id: str, ids: list[str]) -> dict[str, Any]:
+        """Remove up to 50 items from an album (they stay in the library). Only the ids its own listing holds are
+        removed (Google's remove RPC names no album, so a key from another album would act there); the outcome is
+        read back from the album. The client asks the person before this runs (it is on the registry's ask list)."""
         key = _album_key(album_id)
         keys = check_ids(ids, ALBUM_ITEMS_MAX)
-        requested = tuple(sorted(keys))
-        now = self._clock()
-        if confirm is None:
-            state = self._album_state(key)
-            found = self._find_in_album(key, keys)
-            if not found:
-                raise invalid("none of these ids is in this album: use the ids photos_list(source=album) gives")
-            token = secrets.token_urlsafe(18)
-            with self._lock:
-                self._removals = {t: r for t, r in self._removals.items() if now - r.created < CONFIRM_TTL}
-                self._removals[token] = _Removal(key, requested, tuple(found), state["shared"], now)
-            names = self._filenames(list(found))
-            return {
-                "preview": True,
-                "album": state,
-                "remove": [self._raw_item(found[k], names, archived_default=None, album_id=key) for k in found],
-                "not_in_album": [k for k in keys if k not in found],
-                "confirm_token": token,
-                "expires_at": datetime.fromtimestamp(now + CONFIRM_TTL, UTC).isoformat(timespec="seconds"),
-                "next_step": (
-                    "Nothing was changed. Show the person which photos will leave this album (they stay in the "
-                    "library) and wait for their explicit yes; then call again with the same album_id and ids "
-                    "and confirm set to confirm_token."
-                ),
-            }
-        with self._lock:
-            removal = self._removals.pop(confirm, None) if isinstance(confirm, str) else None
-        if (
-            removal is None
-            or now - removal.created >= CONFIRM_TTL
-            or removal.album != key
-            or removal.requested != requested
-        ):
-            raise PhotosError("confirm_invalid", log_detail="unknown, expired or different removal")
         before = self._album_state(key)
-        self.state.take("write", len(removal.found))
-        found = list(removal.found)
+        found = list(self._find_in_album(key, keys))
+        if not found:
+            raise invalid("none of these ids is in this album: use the ids photos_list(source=album) gives")
+        self.state.take("write", len(found))
         payload = (
             album_payloads.RemoveItemsFromSharedAlbum(key, found)
-            if removal.shared
+            if before["shared"]
             else album_payloads.RemoveItemsFromAlbum(found)
         )
         self._write([payload], action="remove", album=key, items=len(found))
         after = self._album_state(key)
         return {
             "album": after,
-            "requested": len(found),
+            "requested": len(keys),
             "removed": _difference(before.get("count"), after.get("count")),
+            "not_in_album": [k for k in keys if k not in found],
             "freshness": self._freshness(),
         }
+
+    def album_delete(self, album_id: str) -> dict[str, Any]:
+        """Delete one of this account's own albums (its photos stay in the library), read back: the album no longer
+        opens. A shared album is left to the app (deleting it changes it for everyone in it)."""
+        key = _album_key(album_id)
+        state = self._album_state(key)
+        if state["shared"]:
+            raise invalid(
+                "this is a shared album: delete or leave it in the Google Photos app (it changes the album for "
+                "everyone in it)"
+            )
+        self.state.take("write", 1)
+        self._write([album_payloads.DeleteAlbum([key])], action="delete_album", album=key, items=0)
+        gone = self._one(payloads.GetAlbumPage(key, auth_key=self._album_auth.get(key)), required=False) is None
+        with self._lock:
+            self._album_shared.pop(key, None)
+            self._album_auth.pop(key, None)
+        album = {"id": key, "title": state.get("title"), "count": state.get("count")}
+        return {"album": album, "deleted": gone, "freshness": self._freshness()}
+
+    # -- the trash -----------------------------------------------------------------------------------------------
+
+    def trash(self, ids: list[str]) -> dict[str, Any]:
+        """Move up to 50 items (ids from search or list) to the trash, where Google keeps them 60 days; read back from
+        the trash. Ids that are not items of this library are left alone (not_found)."""
+        keys = check_ids(ids, TRASH_MAX)
+        found = self._dedup_keys(keys)
+        if not found:
+            raise invalid("none of these ids is an item of this library: use ids from photos_search or photos_list")
+        dedups = {k: dedup for k, (_, dedup) in found.items()}
+        self.state.take("write", len(dedups))
+        self._write([trash_payloads.MoveToTrash(list(dedups.values()))], action="trash", album=None, items=len(dedups))
+        in_trash = self._find_in_trash(list(dedups))
+        return {
+            "requested": len(keys),
+            "trashed": len(in_trash),
+            "not_found": [k for k in keys if k not in found],
+            "items": [{"id": k, "url": PHOTO_URL.format(k), "in_trash": k in in_trash} for k in dedups],
+            "freshness": self._freshness(),
+        }
+
+    def restore(self, ids: list[str]) -> dict[str, Any]:
+        """Bring up to 50 items back from the trash (ids as photos_list(source=trash) gives them)."""
+        keys = check_ids(ids, TRASH_MAX)
+        found = self._find_in_trash(keys)
+        dedups = {k: r.dedup_key for k, r in found.items() if r.dedup_key}
+        if not dedups:
+            raise invalid("none of these ids is in the trash: photos_list(source=trash) lists it")
+        self.state.take("write", len(dedups))
+        payload = trash_payloads.RestoreFromTrash(list(dedups.values()))
+        self._write([payload], action="restore", album=None, items=len(dedups))
+        still = self._find_in_trash(list(dedups))
+        return {
+            "requested": len(keys),
+            "restored": len(dedups) - len(still),
+            "not_in_trash": [k for k in keys if k not in dedups],
+            "items": [{"id": k, "url": PHOTO_URL.format(k), "restored": k not in still} for k in dedups],
+            "freshness": self._freshness(),
+        }
+
+    def _dedup_keys(self, keys: list[str]) -> dict[str, tuple[rpc.ItemInfo, str]]:
+        """The items of this library among ``keys``, with the dedup keys the trash RPC takes (VrseUb, INFO_CHUNK to a
+        request), in the order asked."""
+        found: dict[str, tuple[rpc.ItemInfo, str]] = {}
+        for start in range(0, len(keys), INFO_CHUNK):
+            chunk = keys[start : start + INFO_CHUNK]
+            data = self._rpc(*[payloads.GetItemInfo(k) for k in chunk])
+            for k, raw in zip(chunk, data, strict=True):
+                info = rpc.parse_item_info(raw) if raw is not None else None
+                if info is not None and info.dedup_key and info.media_key in (None, k):
+                    found[k] = (info, info.dedup_key)
+        return {k: found[k] for k in keys if k in found}
+
+    def _find_in_trash(self, keys: list[str]) -> dict[str, rpc.RawItem]:
+        """The ``keys`` the trash holds (TRASH_SCAN_PAGES pages at most, most recently deleted first)."""
+        remaining = set(keys)
+        found: dict[str, rpc.RawItem] = {}
+        token: str | None = None
+        for _ in range(TRASH_SCAN_PAGES):
+            page = rpc.parse_library_page(self._one(payloads.GetTrashPage(page_id=token), required=True))
+            for item in page.items:
+                if item.media_key in remaining:
+                    found[item.media_key] = item
+                    remaining.discard(item.media_key)
+            token = page.next_token
+            if not remaining or not token:
+                break
+        return {k: found[k] for k in keys if k in found}
 
     # -- uploads -------------------------------------------------------------------------------------------------
 
@@ -751,7 +810,7 @@ class PhotosService:
         by_id = {r.payload_id: r for r in results}
         data = [by_id[p.payload_id].data if p.payload_id in by_id else None for p in requests]
         self._forget_pages()
-        if any(d is None for d in data) and action in ("create", "upload"):
+        if any(d is None for d in data) and action in ("create", "upload", "trash", "restore", "delete_album"):
             self.state.audit({"action": action, "album": album, "items": items, "outcome": "refused"})
             raise PhotosError("refused", log_detail=f"{requests[0].rpcid} returned no data")
         self.state.audit({"action": action, "album": album, "items": items, "outcome": "sent"})
@@ -892,9 +951,9 @@ class PhotosService:
         out = {
             "service": "photos-mcp",
             "version": __version__,
-            # The only changes this server makes: albums (create, add, remove) and uploads. Nothing deletes or edits
-            # media.
-            "changes": ["albums", "uploads"],
+            # The only changes this server makes: albums (create, add, remove, delete), uploads and the trash (move
+            # there and back). Nothing empties the trash or edits media.
+            "changes": ["albums", "uploads", "trash"],
             "session": session,
             "breaker": state["breaker"],
             "budgets": state["budgets"],

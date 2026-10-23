@@ -1,7 +1,7 @@
-"""Static guard over the shipped source: the only changes it can make are album changes (create, add, remove) and
-uploads (a new item from a file), it talks to Google's hosts only (and, for a link a caller gives, to that public host
-through the guarded fetch), and echoes no exception text. A new RPC, host or builder must be a deliberate change
-here."""
+"""Static guard over the shipped source: the only changes it can make are album changes (create, add, remove,
+delete), uploads (a new item from a file) and the trash (move items there and back; never emptied), it talks to
+Google's hosts only (and, for a link a caller gives, to that public host through the guarded fetch), and echoes no
+exception text. A new RPC, host or builder must be a deliberate change here."""
 
 from __future__ import annotations
 
@@ -10,39 +10,41 @@ import re
 from pathlib import Path
 
 from photos_mcp import fetch, transport, upload
-from photos_mcp.vendor.gpwc import album_payloads, payloads
+from photos_mcp.vendor.gpwc import album_payloads, payloads, trash_payloads
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "photos_mcp"
 FILES = sorted(SRC.rglob("*.py"))
 SOURCE = {path: path.read_text() for path in FILES}
 ALL = "\n".join(SOURCE.values())
 
-# Reads, and swbisb: does the library already hold a file with this hash (an upload asks first).
-READ_RPCS = {"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf", "swbisb"}
-# Album changes: create, add, add to a shared album, remove, remove from a shared album.
-ALBUM_RPCS = {"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue"}
+# Reads, swbisb (does the library already hold a file with this hash: an upload asks first) and zy0IHe (the trash).
+READ_RPCS = {"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf", "swbisb", "zy0IHe"}
+# Album changes: create, add, add to a shared album, remove, remove from a shared album, delete an album.
+ALBUM_RPCS = {"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue", "nV6Qv"}
 # Making a media item from an uploaded file.
 UPLOAD_RPCS = {"mdpdU"}
-WRITE_RPCS = ALBUM_RPCS | UPLOAD_RPCS
+# Moving items to the trash and back (one RPC, two payloads).
+TRASH_RPCS = {"XwAOJf"}
+WRITE_RPCS = ALBUM_RPCS | UPLOAD_RPCS | TRASH_RPCS
 # Every other RPC id gpwc 651aa268 and Google-Photos-Toolkit know (trash, archive, favourites, sharing,
 # geo/description/timestamp edits, downloads, uploads, partner sharing, Drive import, locked folder, reorder).
 OTHER_GPWC_RPCS = {
     "AQNOFd", "DaSgWe", "dnv2s", "e9T5je", "Es7fke", "EtUHOe", "F2A0H", "Ftfh0", "pLFTfd", "SusGud",
-    "TLvKMb", "V8RKJ", "w7TP3c", "XwAOJf", "yCLA7", "zy0IHe", "nMFwOc", "StLnCe", "Pp2Xxe",
+    "TLvKMb", "V8RKJ", "w7TP3c", "yCLA7", "nMFwOc", "StLnCe", "Pp2Xxe",
     "QD9nKf",
 }  # fmt: skip
-# Builders that must never exist: every change but the album ones and the upload, and the reads photos-mcp does not
-# do.
+# Builders that must never exist: every change but the album ones, the upload and the trash, and the reads photos-mcp
+# does not do.
 WRITE_BUILDERS = {
-    "MoveToTrash", "RestoreFromTrash", "SetFavorite", "UnFavorite", "SetArchive", "UnArchive",
+    "EmptyTrash", "DeleteFromTrash", "SetFavorite", "UnFavorite", "SetArchive", "UnArchive",
     "SetItemTimestamp", "SetItemDescription", "SetItemGeoData", "DeleteItemGeoData", "AddItemsToNewAlbum",
     "GetDownloadToken", "CheckDownloadToken", "SaveSharedMediaToLibrary", "SavePartnerSharedMedia",
     "GetUnsupportedVideoDownloadUrl", "ImportMediaFromDrive", "GetPartnerSharedMedia", "GetSharedLinksPage",
-    "GetTrashPage", "MoveToLockedFolder", "RemoveFromLockedFolder", "SetAlbumItemOrder",
+    "MoveToLockedFolder", "RemoveFromLockedFolder", "SetAlbumItemOrder",
 }  # fmt: skip
 ALBUM_BUILDERS = {
     "CreateAlbum", "AddItemsToExistingAlbum", "AddItemsToExistingSharedAlbum", "RemoveItemsFromAlbum",
-    "RemoveItemsFromSharedAlbum",
+    "RemoveItemsFromSharedAlbum", "DeleteAlbum",
 }  # fmt: skip
 
 
@@ -56,12 +58,22 @@ def test_transport_allowlist_is_exactly_the_read_rpcs():
     assert transport.RPC_ALLOWLIST == READ_RPCS
 
 
-def test_the_write_allowlist_is_exactly_the_album_changes_and_the_upload():
+def test_the_write_allowlist_is_exactly_the_album_changes_the_upload_and_the_trash():
     assert transport.WRITE_RPC_ALLOWLIST == WRITE_RPCS
     assert not transport.WRITE_RPC_ALLOWLIST & transport.RPC_ALLOWLIST
     rpcids = set(re.findall(r'self\.rpcid = "([A-Za-z0-9]+)"', SOURCE[SRC / "vendor" / "gpwc" / "album_payloads.py"]))
     assert rpcids == ALBUM_RPCS
     assert set(re.findall(r'self\.rpcid = "([A-Za-z0-9]+)"', SOURCE[SRC / "upload.py"])) == UPLOAD_RPCS
+    trash = SOURCE[SRC / "vendor" / "gpwc" / "trash_payloads.py"]
+    assert set(re.findall(r'self\.rpcid = "([A-Za-z0-9]+)"', trash)) == TRASH_RPCS
+    trash_builders = {
+        name
+        for name, obj in vars(trash_payloads).items()
+        if isinstance(obj, type) and obj.__module__ == trash_payloads.__name__
+    }
+    assert trash_builders == {"MoveToTrash", "RestoreFromTrash"}
+    # Into the trash (1) and back (3), nothing else: no permanent deletion or emptying.
+    assert re.findall(r"self\.data = \[None, (\d), dedup_keys, \d\]", trash) == ["1", "3"]
     upload_builders = {
         name for name, obj in vars(upload).items() if isinstance(obj, type) and issubclass(obj, payloads.Payload)
     }
@@ -78,6 +90,8 @@ def test_album_changes_go_only_through_the_write_path():
     # The album builders are used by the service's album methods only, and only GoogleTransport.write sends them.
     for path in FILES:
         if "album_payloads" in SOURCE[path] and path.name not in ("album_payloads.py",):
+            assert path.name == "client.py", path
+        if "trash_payloads" in SOURCE[path] and path.name not in ("trash_payloads.py",):
             assert path.name == "client.py", path
     client = SOURCE[SRC / "client.py"]
     assert client.count("self._t.write(") == 1
@@ -160,9 +174,19 @@ def test_the_login_client_reaches_only_the_login_service():
         }  # fmt: skip
         if any(name.startswith(("urllib.request", "urllib.error", "websockets")) for name in imported):
             assert path.name == "login_client.py", path
+    # login_client.py is signin-window's client plus two fixed account routes; the library's builds every URL from
+    # its base (and the live view's from it too).
     text = SOURCE[SRC / "login_client.py"]
-    assert re.findall(r"urllib\.request\.Request\(\s*([^,]+),", text) == ["self.base + path"]
-    assert 'url = "ws" + self.base[len("http") :] + f"/logins/' in text
+    assert "from signin_window.client import LoginClient as _Client" in text
+    assert re.findall(r'self\.request\("(?:POST|DELETE)", f"([^"]*)"', text) == [
+        "/accounts/{self._account(account)}/refresh",
+        "/accounts/{self._account(account)}",
+    ]
+    import signin_window.client as library
+
+    source = Path(library.__file__).read_text()
+    assert re.findall(r"urllib\.request\.Request\(\s*(?:#[^\n]*\n\s*)?([^,]+),", source) == ["self.base + path"]
+    assert 'url = "ws" + self.base[len("http") :] + f"/logins/' in source
 
 
 def test_network_libraries_are_confined_to_the_transport_and_the_guarded_fetch():
