@@ -1,9 +1,10 @@
-"""photos-mcp: FastMCP server over Google Photos libraries, read-only.
+"""photos-mcp: FastMCP server over Google Photos libraries: find and look at photos, add photos and videos, and
+organise albums.
 
 It reads a Google session snapshot (``PHOTOS_SESSION_DIR``) and serves MCP over streamable
 HTTP (bearer required) or stdio. Safety boundary (enforced here, in ``transport`` and by
-``tests/test_safety.py``): no write RPC exists in this code base, every RPC id and host is
-allowlisted, Google calls are paced and budgeted, and tool results never carry exception
+``tests/test_safety.py``): the only changes are album changes and uploads, every RPC id and host
+is allowlisted, Google calls are paced and budgeted, and tool results never carry exception
 text.
 
 Each request acts for one account (README "Accounts"): the default one, or the one the
@@ -15,11 +16,14 @@ refused, never replaced by another.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import functools
 import json
 import logging
 import sys
 import threading
+import time
 from collections.abc import Callable
 from importlib import resources
 from typing import Annotated, Any, Literal, TypeVar
@@ -39,18 +43,28 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
-from . import __version__, accounts, logs
+from . import __version__, accounts, fetch, logs
 from .accounts import Account
 from .auth import PROXY_CLIENT, AuthError, bearer_auth_from_env
 from .cache import ThumbCache
 from .client import AGENT_INPUT_CODES, PhotosService
 from .config import ConfigError, Settings
 from .connect import ConnectFlow
-from .errors import NEXT_STEP, PhotosError
+from .errors import NEXT_STEP, PhotosError, invalid
 from .login_client import LoginClient, LoginUnavailable
 from .session import SessionReader
 from .state import StateStore
-from .transport import IMAGE_CONCURRENCY, IMAGE_JITTER, IMAGE_MIN_INTERVAL, CurlSender, GoogleTransport, Pacer
+from .transport import (
+    IMAGE_CONCURRENCY,
+    IMAGE_JITTER,
+    IMAGE_MIN_INTERVAL,
+    UPLOAD_CONCURRENCY,
+    CurlSender,
+    GoogleTransport,
+    Pacer,
+)
+from .upload import Gate, Staging
+from .uploads import UploadLinks
 
 log = logging.getLogger("photos")
 T = TypeVar("T")
@@ -63,6 +77,12 @@ LINK = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False
 CREATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 ADD = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 REMOVE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+# Uploading the same file again adds no copy (Google keeps one).
+UPLOAD = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+# Inline upload data (base64): at most this many bytes once decoded. Larger files go through an upload link.
+DATA_MAX_BYTES = 10 * 1024**2
+# photos_upload waits this long for one of the server's upload slots (upload.Gate), then answers busy.
+UPLOAD_WAIT = 60.0
 Ids50 = Annotated[list[str], Field(min_length=1, max_length=50, description="Item ids (max 50)")]
 
 HTTP_OPTIONS: dict[str, Any] = {
@@ -100,8 +120,8 @@ _ERRORS = "\n".join(f"- {code}: {text}" for code, text in NEXT_STEP.items())
 
 INSTRUCTIONS = f"""\
 Google Photos for the calling person's own account, through the same private web API
-photos.google.com uses: find and look at photos and videos, and organise albums. Nothing here
-deletes, archives, edits or shares photos.
+photos.google.com uses: find and look at photos and videos, add photos and videos, and organise
+albums. Nothing here deletes, archives, edits or shares photos.
 
 Flow: photos_search -> photos_contact_sheet -> photos_view, then photos_show for the person.
 1. photos_search(query) uses Google's own search: people (a name the library has
@@ -135,6 +155,14 @@ confirm, show the person the preview (album, photos to remove), and only after t
 call it again with the same arguments and confirm set to the preview's confirm_token. Its ids are
 the ones photos_list(source=album) gives for that album. Each change is read back from the album
 (added / removed counts) and counts against a daily write budget (photos_status: budgets).
+
+Adding photos and videos: photos_upload_link(album_id) gives a one-time page where the person
+picks photos and videos from their phone or computer; each goes straight into their library (and
+the album). Give them the url. The same url takes one file per PUT from a client that has the file
+on disk, such as an image you made in a code sandbox (put_example). photos_upload(url=...) adds
+the photo or video at a public https link; photos_upload(data=...) one you have as base64 (up to
+10 MiB). A file the library already holds is not added twice (already_in_library). Each upload
+counts against the write budget; photos_list(source=recently_added) shows what arrived.
 
 Images: at most 1568 px on the longest edge; originals and downloads are not available here
 (the person opens an item's url to download it).
@@ -210,6 +238,7 @@ class Accounts:
         self.image_pacer = getattr(transport, "image_pacer", None) or Pacer(
             concurrency=IMAGE_CONCURRENCY, min_interval=IMAGE_MIN_INTERVAL, jitter=IMAGE_JITTER
         )
+        self.upload_pacer = getattr(transport, "upload_pacer", None) or Pacer(concurrency=UPLOAD_CONCURRENCY)
         self._others: dict[str, tuple[Account, PhotosService]] = {}
         self._lock = threading.Lock()
 
@@ -284,6 +313,7 @@ class Accounts:
             sender_factory=self._sender_factory,
             pacer=self.pacer,
             image_pacer=self.image_pacer,
+            upload_pacer=self.upload_pacer,
             on_dead=lambda _generation, _code: self._ask_keeper(account.id),
         )
         cache = ThumbCache(account.state_dir / "cache", settings.cache_max_bytes)
@@ -329,6 +359,18 @@ def caller_account(header: str | None) -> str | None:
     return values[0]
 
 
+def _decode(data: str) -> bytes:
+    """Base64 (standard or URL-safe, padding optional, a data: URL prefix allowed) to bytes."""
+    text = data.strip()
+    if text.startswith("data:") and "," in text[:200]:
+        text = text.split(",", 1)[1]
+    text = "".join(text.split()).replace("-", "+").replace("_", "/")
+    try:
+        return base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        raise invalid("data must be the file as base64") from None
+
+
 def build_service(settings: Settings) -> PhotosService:
     """The default account's service alone (kept for callers that want one account)."""
     return Accounts.from_settings(settings).default
@@ -362,6 +404,12 @@ def create_server(
         # Sign-in links (connect.py): pages people open in a browser, so outside the bearer; each needs its link id.
         flow = ConnectFlow(settings, registry.login)
         mcp._additional_http_routes.append(Mount("/connect", app=flow.app()))  # as fastmcp.contrib does
+    gate = Gate(UPLOAD_CONCURRENCY)  # uploads at once on this server, by links and photos_upload alike
+    links: UploadLinks | None = None
+    if settings is not None and settings.public_url:
+        # Upload links (uploads.py): a page and a PUT address, outside the bearer like the sign-in links.
+        links = UploadLinks(settings, registry.get, gate)
+        mcp._additional_http_routes.append(Mount("/uploads", app=links.app()))
 
     async def call(fn: Callable[..., T], *args: Any) -> T:
         """Run ``fn`` (a PhotosService method) for the caller's own account."""
@@ -554,6 +602,64 @@ def create_server(
         same album_id and ids and confirm. Returns the album afterwards and removed."""
         return await call(PhotosService.album_remove, album_id, ids, confirm)
 
+    @mcp.tool(annotations=UPLOAD)
+    async def photos_upload(
+        url: Annotated[
+            str | None, Field(max_length=fetch.URL_MAX, description="A public https link to the photo or video")
+        ] = None,
+        data: Annotated[
+            str | None,
+            Field(max_length=DATA_MAX_BYTES * 4 // 3 + 128, description="Or the file itself, base64 (up to 10 MiB)"),
+        ] = None,
+        filename: Annotated[
+            str | None, Field(max_length=200, description="Its name in the library (default: from the link or date)")
+        ] = None,
+        album_id: Annotated[
+            str | None, Field(min_length=8, max_length=128, description="Also put it in this album (photos_albums)")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Add one photo or video to the library (and to an album): the file at a public https link (url), or one you
+        have as base64 (data). A file the library already holds is not added again (already_in_library). Returns the
+        item {id, url, type, filename, taken_at, tz_known, width, height, uploaded_at} and the album afterwards. For the
+        person's own files, or a file on disk, use photos_upload_link."""
+
+        def run(svc: PhotosService) -> dict[str, Any]:
+            if (url is None) == (data is None):
+                raise invalid("give either url or data")
+            directory = settings.upload_dir if settings is not None else svc.state.path.parent / "uploads"
+            limit = settings.upload_max_bytes if settings is not None else DATA_MAX_BYTES
+            if not gate.acquire(UPLOAD_WAIT):
+                raise PhotosError("busy", log_detail="no upload slot")
+            try:
+                with Staging(directory, limit if url is not None else min(limit, DATA_MAX_BYTES)) as staging:
+                    name = filename
+                    if url is not None:
+                        hint = fetch.fetch(url, staging.write)
+                        name = filename or hint
+                    else:
+                        staging.write(_decode(data or ""))
+                    now = time.time()
+                    return svc.upload(staging.finish(name, None, now), album_id)
+            finally:
+                gate.release()
+
+        return await call(run)
+
+    if links is not None:
+        upload_links = links
+
+        @mcp.tool(annotations=LINK)
+        async def photos_upload_link(
+            album_id: Annotated[
+                str | None, Field(min_length=8, max_length=128, description="Put every file in this album too")
+            ] = None,
+        ) -> dict[str, Any]:
+            """A one-time page where the person adds photos and videos from their phone or computer straight into
+            their own Google Photos library (and the album): for the calling person's account only, 60 minutes and
+            100 files. The same url takes one file per PUT from a client with the file on disk (put_example), answering
+            with the new item. Give the person the url."""
+            return await call(lambda svc: upload_links.create(svc, album_id))
+
     @mcp.tool(annotations=LOCAL)
     async def photos_status() -> dict[str, Any]:
         """Session account and generation, snapshot age, breaker, daily budgets left, cache
@@ -593,9 +699,7 @@ def main(argv: list[str] | None = None) -> None:
         from . import admin
 
         raise SystemExit(admin.main(argv[1:]))
-    parser = argparse.ArgumentParser(
-        prog="photos-mcp", description="Read-only MCP server for one Google Photos library."
-    )
+    parser = argparse.ArgumentParser(prog="photos-mcp", description="MCP server for Google Photos libraries.")
     parser.add_argument(
         "--transport",
         choices=("http", "stdio"),

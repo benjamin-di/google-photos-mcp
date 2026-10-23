@@ -15,10 +15,12 @@
   account mismatch, marks a generation dead; a bare 401 and a consent redirect are
   reported, not dead; anything else unproven is ``upstream_error``.
 * RPC id allowlists and host allowlist (HTTPS only): ``rpc`` sends only the read RPCs; ``write``
-  sends only the album changes in ``WRITE_RPC_ALLOWLIST`` and never retries a request that may have
-  reached Google (``outcome_unknown``). Redirects are followed by hand, at most
-  3, and only within the allowlist; a redirect elsewhere is classified, never followed.
-* Streamed body caps: 8 MiB per RPC or page, 15 MiB per image.
+  sends only the changes in ``WRITE_RPC_ALLOWLIST`` (album changes, making an uploaded item) and never
+  retries a request that may have reached Google (``outcome_unknown``). ``upload_bytes`` sends a file
+  to Google's upload endpoint (``upload.UPLOAD_PATH``) and nowhere else, one file at a time per slot of
+  its own pacer (2 slots), so a long upload never holds the RPC slot. Redirects are followed by hand,
+  at most 3, and only within the allowlist; a redirect elsewhere is classified, never followed.
+* Streamed body caps: 8 MiB per RPC, page or upload answer, 15 MiB per image.
 * Daily budgets and the persisted breaker (``state.StateStore``).
 * Precise failure classification into the codes of ``errors.NEXT_STEP``.
 
@@ -36,10 +38,10 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 from urllib.parse import urljoin, urlsplit
 
-from . import logs
+from . import logs, upload
 from .errors import PhotosError
 from .session import CookieStore, SessionReader, Snapshot, Template, canonical_order
 from .state import StateStore
@@ -48,10 +50,12 @@ from .vendor.gpwc.payloads import Payload
 
 log = logging.getLogger(__name__)
 
-RPC_ALLOWLIST = frozenset({"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf"})
-# Album changes only: create an album (OXvT9d), add items to an album (E1Cajb) or a shared album (laUYf), remove items
-# from an album (ycV3Nd) or a shared album (LjmOue). Nothing here deletes, trashes, archives, edits or shares media.
-WRITE_RPC_ALLOWLIST = frozenset({"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue"})
+# Reads, and swbisb: whether the library already holds a file (by its SHA-1), which an upload asks first.
+RPC_ALLOWLIST = frozenset({"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf", "swbisb"})
+# Album changes: create an album (OXvT9d), add items to an album (E1Cajb) or a shared album (laUYf), remove items
+# from an album (ycV3Nd) or a shared album (LjmOue); and make a media item from an upload (mdpdU). Nothing here
+# deletes, trashes, archives, edits or shares media.
+WRITE_RPC_ALLOWLIST = frozenset({"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue", "mdpdU"})
 PAGE_HOST = "photos.google.com"
 IMAGE_HOSTS = re.compile(r"^(photos\.fife\.usercontent\.google\.com|lh[0-9]\.googleusercontent\.com)$")
 PHOTOS_URL = "https://photos.google.com/"
@@ -61,6 +65,7 @@ JITTER = 0.15
 IMAGE_CONCURRENCY = 4
 IMAGE_MIN_INTERVAL = 0.1
 IMAGE_JITTER = 0.05
+UPLOAD_CONCURRENCY = 2
 QUEUE_WAIT = 30.0
 CONNECT_TIMEOUT, READ_TIMEOUT = 10.0, 20.0
 # curl's read timeout on a streamed body is a low-speed limit, not a total: a body that
@@ -73,6 +78,9 @@ RPC_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MAX_BYTES = 15 * 1024 * 1024
 
 FORM_TYPE = "application/x-www-form-urlencoded;charset=UTF-8"
+# The web app's upload requests carry a form content type whatever the bytes are; the chunks in lower case, as recorded.
+CHUNK_TYPE = "application/x-www-form-urlencoded;charset=utf-8"
+UPLOAD_URL = f"https://photos.google.com{upload.UPLOAD_PATH}"
 # Chrome's Accept-Encoding. Templates never carry it (README "Session snapshot"); the transport sets
 # it at Chrome's position and curl decodes these encodings.
 ACCEPT_ENCODING = "gzip, deflate, br, zstd"
@@ -105,8 +113,25 @@ def request_headers(
     return list(canonical_order(kind, out))
 
 
-def headers_for(snapshot: Snapshot, kind: str, method: str, cookie: str | None) -> list[tuple[str, str]]:
-    """Every header of one request of ``kind`` (``page``, ``rpc`` or ``image``), in order."""
+def headers_for(
+    snapshot: Snapshot,
+    kind: str,
+    method: str,
+    cookie: str | None,
+    *,
+    extra: Headers = (),
+    content_type: str | None = None,
+) -> list[tuple[str, str]]:
+    """Every header of one request of ``kind`` (``page``, ``rpc``, ``image`` or ``upload``), in order.
+
+    An upload request is the app's own XHR to the upload endpoint: the ``rpc`` template without ``x-same-domain``
+    (which only batchexecute carries), its content type, and ``extra`` (the ``x-goog-upload-*`` headers, placed as
+    Chrome places names it does not order itself)."""
+    if kind == "upload":
+        template = tuple((name, value) for name, value in snapshot.headers["rpc"] if name != "x-same-domain")
+        return request_headers(
+            "rpc", (*template, *extra), cookie=cookie, referer=REFERER, content_type=content_type or FORM_TYPE
+        )
     return request_headers(
         kind,
         snapshot.headers[kind],
@@ -175,7 +200,7 @@ class Sender(Protocol):
         *,
         headers: Headers,
         params: Mapping[str, str] | None = None,
-        data: str | None = None,
+        data: str | bytes | None = None,
         max_bytes: int,
     ) -> HttpResponse: ...
 
@@ -205,7 +230,7 @@ class CurlSender:
         *,
         headers: Headers,
         params: Mapping[str, str] | None = None,
-        data: str | None = None,
+        data: str | bytes | None = None,
         max_bytes: int,
     ) -> HttpResponse:
         try:
@@ -355,6 +380,7 @@ class GoogleTransport:
         sender_factory: Callable[[Snapshot], Sender] = CurlSender,
         pacer: Pacer | None = None,
         image_pacer: Pacer | None = None,
+        upload_pacer: Pacer | None = None,
         clock: Callable[[], float] = time.time,
         on_dead: Callable[[int, str], None] | None = None,
     ) -> None:
@@ -369,6 +395,7 @@ class GoogleTransport:
         self.image_pacer = image_pacer or Pacer(
             concurrency=IMAGE_CONCURRENCY, min_interval=IMAGE_MIN_INTERVAL, jitter=IMAGE_JITTER
         )
+        self.upload_pacer = upload_pacer or Pacer(concurrency=UPLOAD_CONCURRENCY)
         self._clock = clock
         self._ctx: _Context | None = None
         # Image fetches run concurrently with each other and with RPCs: guard shared state.
@@ -398,9 +425,10 @@ class GoogleTransport:
             return self._parse_rpc(ctx, response, payloads)
 
     def write(self, payloads: Sequence[Payload]) -> list[RpcResult]:
-        """One batchexecute POST of album changes. A 400/403 (Google refused it, nothing applied) is retried once
-        with fresh page globals, as for reads; a 5xx or a network failure is never retried: the change may have
-        reached Google, so it is ``outcome_unknown`` and the caller reads back what happened."""
+        """One batchexecute POST of changes (album changes, or making an uploaded item). A 400/403 (Google refused
+        it, nothing applied) is retried once with fresh page globals, as for reads; a 5xx or a network failure is
+        never retried: the change may have reached Google, so it is ``outcome_unknown`` and the caller reads back
+        what happened."""
         payloads = list(payloads)
         rpcids = [p.rpcid for p in payloads]
         if not payloads or any(r not in WRITE_RPC_ALLOWLIST for r in rpcids):
@@ -417,6 +445,77 @@ class GoogleTransport:
                 if response.status in (400, 403):
                     raise PhotosError("refused", log_detail=f"write HTTP {response.status} twice")
             return self._parse_rpc(ctx, response, payloads)
+
+    def upload_bytes(self, source: BinaryIO, *, size: int, name: str, sha1: str) -> str:
+        """Send one file (``size`` bytes read from ``source``) with Google's resumable upload and return the upload
+        token ``mdpdU`` makes the item from (``upload`` module). Nothing is in the library before that, so no failure
+        here is ``outcome_unknown``: the start is retried like a read, a chunk never (the upload would need a status
+        query first), and the caller may simply send the file again. The upload endpoint costs one unit of the RPC
+        budget per file, whatever its size (its chunks are bytes, not requests the budget is for)."""
+        if size <= 0:
+            raise PhotosError("invalid_argument", "the file is empty")
+        common = (("x-goog-hash", f"sha1={sha1}"), ("x-goog-upload-file-name", upload.header_filename(name)))
+        with self.upload_pacer.slot():
+            ctx = self._context()
+            self.state.take("rpc")
+            start = self._upload_post(
+                ctx,
+                UPLOAD_URL,
+                params={"authuser": "0"},
+                extra=(
+                    common[0],
+                    ("x-goog-upload-protocol", "resumable"),
+                    common[1],
+                    ("x-goog-upload-header-content-length", str(size)),
+                    ("x-goog-upload-command", "start"),
+                ),
+                data=upload.start_body(size),
+                content_type=FORM_TYPE,
+                retries=MAX_RETRIES,
+            )
+            if start.headers.get("x-goog-upload-status") != "active":
+                raise PhotosError("schema_changed", log_detail="upload start: no active upload")
+            target = start.headers.get("x-goog-upload-url", "")
+            parts = urlsplit(target)
+            if (
+                not host_allowed(target)
+                or (parts.hostname or "").lower() != PAGE_HOST
+                or parts.path != upload.UPLOAD_PATH
+            ):
+                raise PhotosError("schema_changed", log_detail="upload URL outside the upload endpoint")
+            granularity = start.headers.get("x-goog-upload-chunk-granularity", "")
+            step = (
+                int(granularity)
+                if granularity.isdigit() and 0 < int(granularity) <= upload.CHUNK
+                else upload.GRANULARITY
+            )
+            chunk = max(step, upload.CHUNK // step * step)
+            offset = 0
+            while True:
+                piece = source.read(min(chunk, size - offset))
+                if not piece:
+                    raise PhotosError("invalid_argument", "the file ended before its size")
+                last = offset + len(piece) >= size
+                answer = self._upload_post(
+                    ctx,
+                    target,
+                    extra=(
+                        *common,
+                        ("x-goog-upload-offset", str(offset)),
+                        ("x-goog-upload-command", "upload, finalize" if last else "upload"),
+                    ),
+                    data=piece,
+                    content_type=CHUNK_TYPE,
+                    retries=0,
+                )
+                if answer.headers.get("x-goog-upload-status") != ("final" if last else "active"):
+                    raise PhotosError("schema_changed", log_detail="upload chunk: unexpected upload status")
+                offset += len(piece)
+                if last:
+                    token = answer.body.decode("ascii", "replace").strip()
+                    if not re.fullmatch(r"[A-Za-z0-9+/=_-]{16,8192}", token):
+                        raise PhotosError("schema_changed", log_detail="upload finished without a token")
+                    return token
 
     def fetch_image(self, url: str) -> bytes:
         """GET one thumbnail on the image CDN. Item-level failures don't affect the session."""
@@ -549,6 +648,39 @@ class GoogleTransport:
             raise self._fail(ctx, "blocked", "batchexecute 429")
         return response
 
+    def _upload_post(
+        self,
+        ctx: _Context,
+        url: str,
+        *,
+        extra: Headers,
+        data: bytes,
+        content_type: str,
+        retries: int,
+        params: Mapping[str, str] | None = None,
+    ) -> HttpResponse:
+        """One request to the upload endpoint, classified: anything but a 200 raises."""
+        response = self._send(
+            ctx, "POST", url, kind="upload", label="upload", params=params, data=data, extra=extra,
+            content_type=content_type, retries=retries,
+        )  # fmt: skip
+        if 300 <= response.status < 400:
+            code = _redirect_code(urljoin(url, response.headers.get("location", "")))
+            if code is None:
+                raise PhotosError("upstream_error", log_detail="upload redirected inside Google")
+            raise self._fail(ctx, code, "upload redirected")
+        if response.status == 401:
+            raise PhotosError("session_expired", log_detail="upload 401")
+        if response.status == 429:
+            raise self._fail(ctx, "blocked", "upload 429")
+        if response.status == 413:
+            raise PhotosError("invalid_argument", "Google takes no file this large")
+        if response.status in (400, 403, 404):
+            raise PhotosError("refused", log_detail=f"upload HTTP {response.status}")
+        if response.status != 200:
+            raise PhotosError("upstream_error", log_detail=f"upload HTTP {response.status}")
+        return response
+
     def _get(
         self, ctx: _Context, url: str, *, kind: str, max_bytes: int, follow: bool = True, cookies: bool = True
     ) -> tuple[HttpResponse, str]:
@@ -586,11 +718,13 @@ class GoogleTransport:
         kind: str,
         label: str,
         params: Mapping[str, str] | None = None,
-        data: str | None = None,
+        data: str | bytes | None = None,
         max_bytes: int = RPC_MAX_BYTES,
         cookies: bool = True,
         retries: int = MAX_RETRIES,
         unknown: str = "upstream_error",
+        extra: Headers = (),
+        content_type: str | None = None,
     ) -> HttpResponse:
         """One logical request: host check, pacing, ≤``retries`` retries on 5xx/network, cookie merge. After the
         last attempt a 5xx or network failure is ``unknown`` (``outcome_unknown`` for a change)."""
@@ -598,12 +732,12 @@ class GoogleTransport:
             raise PhotosError("upstream_error", log_detail="request to a host outside the allowlist")
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
-        pacer = self.image_pacer if kind == "image" else self.pacer
+        pacer = {"image": self.image_pacer, "upload": self.upload_pacer}.get(kind, self.pacer)
         cookie: str | None = None
         if cookies:
             with self._cookie_lock:
                 cookie = ctx.cookies.header_for(host, parts.path or "/", self._clock())
-        headers = headers_for(ctx.snapshot, kind, method, cookie)
+        headers = headers_for(ctx.snapshot, kind, method, cookie, extra=extra, content_type=content_type)
         attempt = 0
         while True:
             pacer.space()

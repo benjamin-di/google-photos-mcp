@@ -9,7 +9,8 @@ lock-consistency check (`requirements-runtime.lock` must equal `uv export` of `u
 Tests never reach Google: transport tests script HTTP responses,
 `tests/test_curl_sender.py` uses a local server, and `photos-mcp-session`'s browser
 commands are tested through their pure parts. `tests/test_safety.py` is the boundary of what
-photos-mcp may do to a library (reads, and album changes through `GoogleTransport.write` only):
+photos-mcp may do to a library (reads, and album changes and uploads through `GoogleTransport.write` and
+`upload_bytes` only; the one non-Google request is the guarded link fetch in `fetch.py`):
 a new RPC id, host or payload builder is a deliberate change there, never a side effect.
 
 The session snapshot format (README "Session snapshot", `src/photos_mcp/session.py`,

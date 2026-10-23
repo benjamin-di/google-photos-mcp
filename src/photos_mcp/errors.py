@@ -54,7 +54,8 @@ NEXT_STEP: dict[str, str] = {
     "internal_error": "photos-mcp failed unexpectedly. Retry once; if it repeats, tell the operator.",
     "outcome_unknown": (
         "The change may or may not have reached Google (the connection failed after it was sent). Do not repeat "
-        "it: list the album (photos_list source=album) or photos_albums to see what happened."
+        "it blindly: for an album change list the album (photos_list source=album) or photos_albums; for an upload, "
+        "photos_list(source=recently_added) shows whether it arrived (sending the same file again adds no copy)."
     ),
     "refused": (
         "Google refused the change and nothing was changed (for example an album this account cannot edit). Tell "
@@ -63,6 +64,14 @@ NEXT_STEP: dict[str, str] = {
     "confirm_invalid": (
         "This confirm token is unknown, expired, already used, or for other arguments. Call the tool again "
         "without confirm for a fresh preview and ask the person before confirming."
+    ),
+    "upload_limited": (
+        "Too many upload links were made for this account in the last hour. Give the person the newest link, or try "
+        "again later."
+    ),
+    "fetch_failed": (
+        "The link could not be fetched (no answer, an error page, or too slow). Check that it opens the file "
+        "itself, or give the file another way (photos_upload_link). Nothing was added."
     ),
     "not_signed_in": (
         "This person's Google account is not connected here, or Google ended its session. Call photos_connect and "

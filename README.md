@@ -2,9 +2,11 @@
 
 [MCP](https://modelcontextprotocol.io) server for Google Photos libraries. An assistant can
 **find** photos with Google Photos' own search (people, places, things, text in images,
-dates), **look at** them, show them to the person as a gallery, and **organise albums**
-(create one, add photos, take them out again after the person confirms). It never deletes,
-archives, edits or shares a photo ([Safety](#safety-and-google-posture)). It serves
+dates), **look at** them, show them to the person as a gallery, **add** photos and videos
+(from the person's phone or computer through a one-time upload page, from a link, or a file
+the assistant has; [Uploading](#uploading)) and **organise albums** (create one, add photos,
+take them out again after the person confirms). It never deletes, archives, edits or shares a
+photo ([Safety](#safety-and-google-posture)). It serves
 one library, or one per person behind an authenticating proxy ([Accounts](#accounts)), where
 each person connects their own Google account through a sign-in link
 ([Signing in with a link](#signing-in-with-a-link)).
@@ -132,14 +134,18 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
   `PHOTOS_CACHE_MAX_BYTES`, 2 GiB by default; `0` disables it). Treat it like the photos.
 - The session directory and the browser profile give full access to the Google account.
 - The server talks to nothing but Google's own photo hosts (see "Safety and Google
-  posture"), and its logs carry no photo ids, URLs or cookies.
+  posture"), except to fetch a file from a public link a caller gives `photos_upload`, and its
+  logs carry no photo ids, URLs or cookies.
+- A file being uploaded is held in an anonymous file under the state directory's `uploads/`
+  only until it is sent (nothing is left there, even after a crash).
 
 ## Tools
 
 All are read-only (`readOnlyHint`) except the album changes (`photos_album_create`,
-`photos_album_add`, and `photos_album_remove`, the only `destructiveHint` one) and
-`photos_connect`, which makes a sign-in link and exists only where sign-in links are
-configured; all but `photos_status` and `photos_connect` are `openWorldHint`.
+`photos_album_add`, and `photos_album_remove`, the only `destructiveHint` one), `photos_upload`,
+and the two that make links: `photos_connect` (a sign-in link, only where sign-in links are
+configured) and `photos_upload_link` (an upload link, only with `PHOTOS_PUBLIC_URL`); all but
+`photos_status` and the two link tools are `openWorldHint`.
 Arguments that fail the schema come back as the typed `invalid_argument` error naming the
 argument, never pydantic's raw text.
 
@@ -153,6 +159,8 @@ argument, never pydantic's raw text.
 | `photos_album_create` | `title` (≤200), `ids` ≤50 | the new album `{id, url, title, count, shared}`, `added` |
 | `photos_album_add` | `album_id`, `ids` ≤50 (from search or list) | the album afterwards, `requested`, `added` (from its counts) |
 | `photos_album_remove` | `album_id`, `ids` ≤50 (as the album's own listing gives them), `confirm` | without `confirm`: a preview (`remove`, `not_in_album`, `confirm_token`, `expires_at`) and no change; with it: the album afterwards and `removed` |
+| `photos_upload` | `url` (a public https link) or `data` (base64, ≤10 MiB), `filename`, `album_id` | the new item `{id, url, type, filename, taken_at, tz_known, width, height, uploaded_at}`, `already_in_library`, `size_bytes`, the album afterwards (`added`) |
+| `photos_upload_link` | `album_id` | a one-time upload page for the caller's own account: `{url, expires_at, files_max, file_max_bytes, album, put_example, next_step}` ([Uploading](#uploading)) |
 | `photos_show` | `items` ≤12 `{id, note}`, `title` | a gallery card for the person ([Photo cards](#photo-cards)); the same data as JSON for other clients |
 | `photos_contact_sheet` | `ids` ≤24 | legend `n → id, date` + one JPEG grid ≤1568 px, numbered tiles, video badge |
 | `photos_view` | `ids` ≤4, `max_px` 256–1568 (1024) | per id a label block (width/height of the returned JPEG) + a JPEG block (videos: poster frame) |
@@ -191,6 +199,43 @@ to find matches, so a page can hold fewer than `limit` items while `next_cursor`
 items; `more` says the day holds more than shown or than one page could tell: list it with
 `from_date`=`to_date`), stops at the first year with nothing that old, and looks up all
 filenames in one RPC. "Today" is in `PHOTOS_BUDGET_TZ`.
+
+### Uploading
+
+A photo or video reaches the library the way photos.google.com's own uploader sends it
+([docs/PAYLOADS.md](docs/PAYLOADS.md#uploads)): photos-mcp first asks whether the library
+already holds a file with the same SHA-1 (`swbisb`) and then sends nothing, else it sends the
+bytes to Google's resumable upload endpoint in 16 MiB chunks and makes the item from the
+upload token (`mdpdU`). Only photo and video formats Google Photos keeps are taken, told by
+their first bytes (JPEG, PNG, GIF, WebP, HEIC, AVIF, BMP, TIFF and the raw formats built on
+it; MP4, MOV, 3GP, AVI, MKV, WebM, WMV, MPEG), anything else is refused before it is stored.
+Each file is at most `PHOTOS_UPLOAD_MAX_BYTES` (2 GiB) and costs one unit of the daily write
+budget (two into an album) and three of the RPC budget whatever its size (the hash check, the
+upload endpoint, making the item); the item keeps the file's own date (EXIF), else its
+last-modified time. When the album step fails after the item was made, the answer still has the
+item, and its `album` carries that error. At most 2 files are received or sent at once on a
+server, by links and `photos_upload` alike: another one waits for a slot (up to 5 minutes on a
+link, 1 minute for the tool) before its bytes are read.
+
+- **The person's own files: `photos_upload_link`.** With `PHOTOS_PUBLIC_URL` set, the tool
+  gives the caller a link, `PHOTOS_PUBLIC_URL/uploads/<id>`, to a page where they pick photos
+  and videos on their phone or computer; each goes straight into their own library (and into
+  the album the link names, checked when it is made) and the page says what became of it. The
+  same address takes one file per `PUT` from a client that has it on disk (an image an
+  assistant made in a code sandbox, say): `curl -T <file> -H 'X-File-Name: <name>' <url>`, which
+  answers with the new item. A link works for 60 minutes and 100 files, adds only to the
+  account that asked for it (not one removed and added again since), and needs no bearer: its
+  256-bit id is the credential, so the reverse proxy must pass `/uploads/<id>` (GET and PUT, no
+  query) through without one, as for sign-in links. A body that sends nothing for a minute is
+  dropped. Links live in memory: a restart ends them.
+- **A link: `photos_upload(url=...)`.** The server fetches the file itself, guarded so a link
+  can never reach into the network the server runs in: https on port 443 only; every address
+  the host resolves to must be public, and the request goes to that address only (curl's
+  resolve pin, no proxy, not even one from the environment); redirects, at most 3, are checked
+  the same way; no cookies or credentials are sent, and the whole fetch, headers included, must
+  finish within 10 minutes.
+- **Bytes the assistant has: `photos_upload(data=...)`**, base64 (standard or URL-safe, a
+  `data:` URL prefix allowed), up to 10 MiB.
 
 ### Photo cards
 
@@ -246,8 +291,10 @@ Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable
 | `account_not_connected` | the proxy named an account that is not configured, named none, or another bearer named one | the operator adds the account; never served from another account |
 | `connect_unavailable` | `photos_connect` for the default account (its session is the operator's) | as named |
 | `connect_limited` | more than 6 links an hour for one account | give the newest link |
-| `outcome_unknown` | an album change failed after it was sent (5xx or network): it is never repeated | read the album to see what happened |
-| `refused` | Google refused an album change (an album this account cannot edit) | nothing changed |
+| `upload_limited` | more than 30 upload links an hour for one account | give the newest link |
+| `fetch_failed` | `photos_upload(url=...)`: the link did not answer, answered with an error, or took too long | nothing added |
+| `outcome_unknown` | a change (album change, or making an uploaded item) failed after it was sent (5xx or network): it is never repeated | read the album, or `photos_list(source=recently_added)`, to see what happened |
+| `refused` | Google refused a change (an album this account cannot edit, an upload it would not take) | nothing changed |
 | `confirm_invalid` | a removal's token is unknown, expired, used, or for other arguments | preview again and ask the person |
 
 ## Liveness
@@ -261,26 +308,33 @@ the same generation.
 
 ## Safety and Google posture
 
-- **Album changes only.** Reads go through `GoogleTransport.rpc`, which refuses any RPC
-  id outside `lcxiM EzkLib EWgK9e Z5xsfc snAcKc VrseUb fDcn4b EzwWhf`. Changes go through
-  `GoogleTransport.write`, which refuses any outside `OXvT9d E1Cajb laUYf ycV3Nd LjmOue`
-  (create an album; add items to an album or a shared one; remove items from an album or a
-  shared one) and never retries a request that may have reached Google (`outcome_unknown`,
-  logged). No builder exists for deleting, trashing, archiving, favouriting, editing dates,
-  places or descriptions, sharing, the locked folder or downloads; `tests/test_safety.py`
+- **Album changes and uploads only.** Reads go through `GoogleTransport.rpc`, which refuses any
+  RPC id outside `lcxiM EzkLib EWgK9e Z5xsfc snAcKc VrseUb fDcn4b EzwWhf swbisb` (`swbisb`: does
+  the library hold a file with this hash). Changes go through `GoogleTransport.write`, which
+  refuses any outside `OXvT9d E1Cajb laUYf ycV3Nd LjmOue mdpdU` (create an album; add items to
+  an album or a shared one; remove items from an album or a shared one; make an item from an
+  upload) and never retries a request that may have reached Google (`outcome_unknown`,
+  logged). An upload's bytes go through `GoogleTransport.upload_bytes` to Google's upload
+  endpoint only (`/_/upload/uploadmedia/interactive`, and the session address it answers with,
+  which must be the same endpoint); nothing is in the library until `mdpdU`, so a failure there
+  changes nothing. No builder exists for deleting, trashing, archiving, favouriting, editing
+  dates, places or descriptions, sharing, the locked folder or downloads; `tests/test_safety.py`
   checks the source for other RPC ids and builders, other hosts and other HTTP libraries.
 - **Removing is confirmed.** `photos_album_remove` first finds the ids in the album's own
   listing (Google's remove RPC names no album, so a key from another album would act there)
   and returns a preview and a single-use token, valid 10 minutes, for exactly that album and
   those ids; only that token removes them. Every change is read back from the album
   (`added` / `removed` from its counts), counts against `PHOTOS_DAILY_WRITE_BUDGET` (each
-  account's own, 500 a day) and is appended to `audit.jsonl` in the account's state directory
-  (ids and counts only).
+  account's own, 500 a day; an upload counts one) and is appended to `audit.jsonl` in the
+  account's state directory (ids and counts only).
 - **Hosts:** HTTPS only, `photos.google.com`, `photos.fife.usercontent.google.com`,
   `lh[0-9].googleusercontent.com`. Redirects are followed by hand, at most 3, inside
-  that list; sign-in, consent and `/sorry` redirects are classified, never followed.
+  that list; sign-in, consent and `/sorry` redirects are classified, never followed. The one
+  exception is `photos_upload(url=...)`, which fetches from the public host a caller names
+  through `photos_mcp.fetch` ([Uploading](#uploading)), never with Google's cookies.
 - **Pacing:** RPCs and the app page one at a time, ≥350 ms apart plus jitter; image
-  fetches up to 4 at a time, starts ≥100 ms apart; 10 s connect / 20 s read, ≤2 retries
+  fetches up to 4 at a time, starts ≥100 ms apart; uploads up to 2 files at a time in slots of
+  their own (a long upload never holds the RPC slot); 10 s connect / 20 s read, ≤2 retries
   on 5xx and network errors only. Daily budgets
   `PHOTOS_DAILY_RPC_BUDGET` (3000) and `PHOTOS_DAILY_THUMB_BUDGET` (2000).
 - **Request shape:** the browser behind the snapshot is the source of truth. Each request uses
@@ -351,14 +405,15 @@ flows back from photos-mcp to it.
 | `PHOTOS_STATE_DIR` | `/state` | `state.json` (budgets, breaker, dead generation, last error) and `cache/` |
 | `PHOTOS_DAILY_RPC_BUDGET` | 3000 | RPCs plus app-page loads per day |
 | `PHOTOS_DAILY_THUMB_BUDGET` | 2000 | image fetches per day (cache hits are free) |
-| `PHOTOS_DAILY_WRITE_BUDGET` | 500 | album changes per account and day (items added or removed, albums created) |
+| `PHOTOS_DAILY_WRITE_BUDGET` | 500 | changes per account and day (items added or removed, albums created, files uploaded) |
+| `PHOTOS_UPLOAD_MAX_BYTES` | 2 GiB | the largest file `photos_upload` and upload links take (1 MiB to 10 GiB) |
 | `PHOTOS_BUDGET_TZ` | `UTC` | IANA time zone whose midnight resets the budgets |
 | `PHOTOS_CACHE_MAX_BYTES` | 2 GiB | thumbnail cache, LRU; 0 disables it |
 | `LOG_LEVEL` | `INFO` | photos-mcp's own log lines, JSON on stderr; FastMCP's startup lines and, over HTTP, the web server's access lines (with client addresses) are plain text |
 | `PHOTOS_TRUSTED_ACCOUNT_HEADER` | – | the header the authenticating proxy names the account in ([Accounts](#accounts)); unset: every request is the default account's |
 | `PHOTOS_DEFAULT_ACCOUNT` | `default` | the default account's id (what the proxy's header says for it) |
 | `PHOTOS_ACCOUNT_SESSIONS_DIR` | `/sessions` | the further accounts' snapshots, one directory per account (written by the login service), read-only |
-| `PHOTOS_PUBLIC_URL` | – | where people reach this server (the parent of `/mcp`, e.g. `https://example.com/photos`); with the next two it turns on `photos_connect` |
+| `PHOTOS_PUBLIC_URL` | – | where people reach this server (the parent of `/mcp`, e.g. `https://example.com/photos`); turns on upload links (`photos_upload_link`), and with the next two `photos_connect` |
 | `PHOTOS_LOGIN_URL` | – | the login service on a private network, e.g. `http://photos-mcp-login:8080` (host and port only) |
 | `PHOTOS_LOGIN_TOKEN` | – | the login service's bearer (32+ characters), the same on both |
 

@@ -1,5 +1,6 @@
-"""Static guard over the shipped source: the only changes it can make are album changes (create, add, remove),
-it talks to no other host, and echoes no exception text. A new RPC, host or builder must be a deliberate change
+"""Static guard over the shipped source: the only changes it can make are album changes (create, add, remove) and
+uploads (a new item from a file), it talks to Google's hosts only (and, for a link a caller gives, to that public host
+through the guarded fetch), and echoes no exception text. A new RPC, host or builder must be a deliberate change
 here."""
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ import ast
 import re
 from pathlib import Path
 
-from photos_mcp import transport
+from photos_mcp import fetch, transport, upload
 from photos_mcp.vendor.gpwc import album_payloads, payloads
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "photos_mcp"
@@ -16,17 +17,22 @@ FILES = sorted(SRC.rglob("*.py"))
 SOURCE = {path: path.read_text() for path in FILES}
 ALL = "\n".join(SOURCE.values())
 
-READ_RPCS = {"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf"}
-# Album changes only: create, add, add to a shared album, remove, remove from a shared album.
-WRITE_RPCS = {"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue"}
+# Reads, and swbisb: does the library already hold a file with this hash (an upload asks first).
+READ_RPCS = {"lcxiM", "EzkLib", "EWgK9e", "Z5xsfc", "snAcKc", "VrseUb", "fDcn4b", "EzwWhf", "swbisb"}
+# Album changes: create, add, add to a shared album, remove, remove from a shared album.
+ALBUM_RPCS = {"OXvT9d", "E1Cajb", "laUYf", "ycV3Nd", "LjmOue"}
+# Making a media item from an uploaded file.
+UPLOAD_RPCS = {"mdpdU"}
+WRITE_RPCS = ALBUM_RPCS | UPLOAD_RPCS
 # Every other RPC id gpwc 651aa268 and Google-Photos-Toolkit know (trash, archive, favourites, sharing,
 # geo/description/timestamp edits, downloads, uploads, partner sharing, Drive import, locked folder, reorder).
 OTHER_GPWC_RPCS = {
     "AQNOFd", "DaSgWe", "dnv2s", "e9T5je", "Es7fke", "EtUHOe", "F2A0H", "Ftfh0", "pLFTfd", "SusGud",
-    "swbisb", "TLvKMb", "V8RKJ", "w7TP3c", "XwAOJf", "yCLA7", "zy0IHe", "nMFwOc", "StLnCe", "Pp2Xxe",
+    "TLvKMb", "V8RKJ", "w7TP3c", "XwAOJf", "yCLA7", "zy0IHe", "nMFwOc", "StLnCe", "Pp2Xxe",
     "QD9nKf",
 }  # fmt: skip
-# Builders that must never exist: every change but the album ones, and the reads photos-mcp does not do.
+# Builders that must never exist: every change but the album ones and the upload, and the reads photos-mcp does not
+# do.
 WRITE_BUILDERS = {
     "MoveToTrash", "RestoreFromTrash", "SetFavorite", "UnFavorite", "SetArchive", "UnArchive",
     "SetItemTimestamp", "SetItemDescription", "SetItemGeoData", "DeleteItemGeoData", "AddItemsToNewAlbum",
@@ -50,11 +56,16 @@ def test_transport_allowlist_is_exactly_the_read_rpcs():
     assert transport.RPC_ALLOWLIST == READ_RPCS
 
 
-def test_the_write_allowlist_is_exactly_the_album_changes():
+def test_the_write_allowlist_is_exactly_the_album_changes_and_the_upload():
     assert transport.WRITE_RPC_ALLOWLIST == WRITE_RPCS
     assert not transport.WRITE_RPC_ALLOWLIST & transport.RPC_ALLOWLIST
     rpcids = set(re.findall(r'self\.rpcid = "([A-Za-z0-9]+)"', SOURCE[SRC / "vendor" / "gpwc" / "album_payloads.py"]))
-    assert rpcids == WRITE_RPCS
+    assert rpcids == ALBUM_RPCS
+    assert set(re.findall(r'self\.rpcid = "([A-Za-z0-9]+)"', SOURCE[SRC / "upload.py"])) == UPLOAD_RPCS
+    upload_builders = {
+        name for name, obj in vars(upload).items() if isinstance(obj, type) and issubclass(obj, payloads.Payload)
+    }
+    assert upload_builders == {"Payload", "CommitUpload"}
     builders = {
         name
         for name, obj in vars(album_payloads).items()
@@ -70,6 +81,13 @@ def test_album_changes_go_only_through_the_write_path():
             assert path.name == "client.py", path
     client = SOURCE[SRC / "client.py"]
     assert client.count("self._t.write(") == 1
+    # The upload's change is made only by the service's upload, through the same single write.
+    for path in FILES:
+        if re.search(r"\bCommitUpload\b", SOURCE[path]):
+            assert path.name in ("upload.py", "client.py"), path
+        if "upload_bytes(" in SOURCE[path]:
+            assert path.name in ("transport.py", "client.py"), path
+    assert client.count("self._t.upload_bytes(") == 1
     write = SOURCE[SRC / "transport.py"].split("    def write(", 1)[1].split("\n    def ", 1)[0]
     assert "WRITE_RPC_ALLOWLIST" in write and "retries=0" in write
 
@@ -147,7 +165,7 @@ def test_the_login_client_reaches_only_the_login_service():
     assert 'url = "ws" + self.base[len("http") :] + f"/logins/' in text
 
 
-def test_network_libraries_are_confined_to_the_transport():
+def test_network_libraries_are_confined_to_the_transport_and_the_guarded_fetch():
     for path in FILES:
         tree = ast.parse(SOURCE[path])
         modules = set()
@@ -156,24 +174,58 @@ def test_network_libraries_are_confined_to_the_transport():
                 modules |= {alias.name.split(".")[0] for alias in node.names}
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 modules.add(node.module.split(".")[0])
-        assert not modules & {"requests", "httpx", "urllib3", "socket", "http", "aiohttp"}, path
+        assert not modules & {"requests", "httpx", "urllib3", "http", "aiohttp"}, path
+        if "socket" in modules:
+            assert path.name == "fetch.py", path  # only to resolve a link's host before it is checked and pinned
         if "curl_cffi" in modules:
-            assert path.name == "transport.py", path
+            assert path.name in ("transport.py", "fetch.py"), path
 
 
-def test_only_get_and_post_and_post_only_to_batchexecute():
+def test_the_fetch_pins_every_request_to_a_checked_public_address():
+    text = SOURCE[SRC / "fetch.py"]
+    # One request per hop, each on a fresh session pinned to the address public_address() approved, https only,
+    # no redirects followed by curl, no proxy from the environment, no cookies kept.
+    assert text.count("session.get(") == 1 and text.count("session_factory(") == 1
+    assert "host, current = check_link(current)" in text and "address = public_address(host, resolver)" in text
+    assert re.search(r"session\.get\(\s*current,", text)  # the link rebuilt on the checked host
+    needles = (
+        "CurlOpt.RESOLVE: [pin]",
+        'CurlOpt.PROTOCOLS_STR: "https"',
+        'CurlOpt.REDIR_PROTOCOLS_STR: "https"',
+        'CurlOpt.PROXY: ""',
+        "CurlOpt.TIMEOUT_MS:",
+        "trust_env=False",
+        "allow_redirects=False",
+        "discard_cookies=True",
+    )
+    for needle in needles:
+        assert needle in text, needle
+    assert "is_global" in text
+    assert fetch.MAX_REDIRECTS <= 3
+
+
+def test_only_get_and_post_and_post_only_to_batchexecute_and_the_upload_endpoint():
     text = SOURCE[SRC / "transport.py"]
     for verb in ("PUT", "PATCH", "DELETE"):
         assert not re.search(rf'"{verb}"', text), verb
-    assert re.findall(r'self\._send\(\s*ctx, "(\w+)"', text) == ["POST", "GET"]
+    assert re.findall(r'self\._send\(\s*ctx, "(\w+)"', text) == ["POST", "POST", "GET"]  # batchexecute, upload, GETs
     assert "/data/batchexecute" in SOURCE[SRC / "vendor" / "gpwc" / "client.py"]
+    # The upload POSTs go to the upload endpoint and to the session address Google gives for it, which must be the
+    # same endpoint on the same host.
+    assert upload.UPLOAD_PATH == "/_/upload/uploadmedia/interactive"
+    assert transport.UPLOAD_URL == "https://photos.google.com" + upload.UPLOAD_PATH
+    assert text.count("self._upload_post(") == 2  # both in upload_bytes, nowhere else
+    body = text.split("    def upload_bytes(", 1)[1].split("\n    def ", 1)[0]
+    assert re.findall(r"self\._upload_post\(\s*ctx,\s*(\w+),", body) == ["UPLOAD_URL", "target"]
+    assert "parts.path != upload.UPLOAD_PATH" in body and "!= PAGE_HOST" in body
 
 
 def test_tool_errors_carry_only_the_typed_payload():
     server = SOURCE[SRC / "server.py"]
     raises = re.findall(r"raise ToolError\((.*)\)", server)
     assert raises and all(arg.startswith('_json({"error":') for arg in raises), raises
-    for path in (SRC / "server.py", SRC / "client.py", SRC / "errors.py"):
+    for path in (SRC / "server.py", SRC / "client.py", SRC / "errors.py", SRC / "uploads.py", SRC / "upload.py",
+                 SRC / "fetch.py"):  # fmt: skip
         assert not re.search(r"str\(exc\)|\{exc\}|repr\(exc\)", SOURCE[path]), path
 
 

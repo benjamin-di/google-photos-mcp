@@ -464,7 +464,7 @@ server = [
 
 [[package]]
 name = "google-photos-mcp"
-version = "0.6.1"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "curl-cffi" },

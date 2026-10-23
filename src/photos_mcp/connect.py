@@ -386,8 +386,9 @@ def _page(link: Link | None) -> str:
 BODY = """<header><h1>Connect your Google Photos</h1>
 <p>Sign in on Google's own page below, as you usually do: with your password and the code or prompt Google asks for
 (passkeys do not work in this window). Pasting works too. The page runs in a browser on the server your assistant
-uses, which stays signed in to your Google account; your assistant can then search and look at your photos, and
-change nothing. You can sign it out any time in your Google Account (Security, Your devices).</p>
+uses, which stays signed in to your Google account; your assistant can then search and look at your photos, add
+photos and organise albums for you, and never deletes anything. You can sign it out any time in your Google Account
+(Security, Your devices).</p>
 <div class=bar hidden><span id=host>🔒 accounts.google.com</span><span id=status></span></div></header>
 <main id=intro class=msg><p>This link connects Google Photos for <b>{{ACCOUNT}}</b> on this assistant. Continue only
 if that is you: whoever signs in here, their Google account is the one the assistant will use.</p>

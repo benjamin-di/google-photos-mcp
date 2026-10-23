@@ -27,7 +27,8 @@ class Settings:
     state_dir: Path = Path("/state")
     daily_rpc_budget: int = 3000
     daily_thumb_budget: int = 2000
-    daily_write_budget: int = 500  # album changes per account and day (each account's own)
+    daily_write_budget: int = 500  # changes (album changes, uploads) per account and day (each account's own)
+    upload_max_bytes: int = 2 * 1024**3  # one uploaded file
     cache_max_bytes: int = 2 * 1024**3
     budget_tz: tzinfo = field(default=UTC)
     # Accounts (README "Accounts"): the default one is the snapshot in session_dir; further ones live in
@@ -43,6 +44,11 @@ class Settings:
     @property
     def cache_dir(self) -> Path:
         return self.state_dir / "cache"
+
+    @property
+    def upload_dir(self) -> Path:
+        """Where files being uploaded are held (anonymous files, gone once sent)."""
+        return self.state_dir / "uploads"
 
     @property
     def connect_enabled(self) -> bool:
@@ -62,6 +68,7 @@ class Settings:
             daily_rpc_budget=_int(env, "PHOTOS_DAILY_RPC_BUDGET", 3000, 0, 100_000),
             daily_thumb_budget=_int(env, "PHOTOS_DAILY_THUMB_BUDGET", 2000, 0, 100_000),
             daily_write_budget=_int(env, "PHOTOS_DAILY_WRITE_BUDGET", 500, 0, 100_000),
+            upload_max_bytes=_int(env, "PHOTOS_UPLOAD_MAX_BYTES", 2 * 1024**3, 1024**2, 10 * 1024**3),
             cache_max_bytes=_int(env, "PHOTOS_CACHE_MAX_BYTES", 2 * 1024**3, 0, 1024**4),
             budget_tz=_zone(env, "PHOTOS_BUDGET_TZ"),
             default_account=_account(env),

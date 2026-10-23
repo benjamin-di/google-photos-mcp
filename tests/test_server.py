@@ -27,8 +27,10 @@ TOOLS = {
     "photos_album_create",
     "photos_album_add",
     "photos_album_remove",
+    "photos_upload",
 }
-ALBUM_TOOLS = {"photos_album_create", "photos_album_add", "photos_album_remove"}
+# The tools that change a library: album changes and uploads.
+CHANGE_TOOLS = {"photos_album_create", "photos_album_add", "photos_album_remove", "photos_upload"}
 
 
 def run(coro):
@@ -49,8 +51,8 @@ def test_tool_surface_and_annotations(service):
     tools = run(_list(create_server(service)))
     assert {tool.name for tool in tools} == TOOLS
     for tool in tools:
-        # Only the album tools change anything; only removing is destructive.
-        assert tool.annotations.read_only_hint is (tool.name not in ALBUM_TOOLS), tool.name
+        # Only the album tools and uploads change anything; only removing is destructive.
+        assert tool.annotations.read_only_hint is (tool.name not in CHANGE_TOOLS), tool.name
         assert tool.annotations.destructive_hint is (tool.name == "photos_album_remove"), tool.name
         assert tool.annotations.open_world_hint is (tool.name != "photos_status"), tool.name
 
@@ -90,7 +92,7 @@ def test_contact_sheet_returns_legend_then_jpeg(service):
 def test_status_tool(service):
     result = run(_call(create_server(service), "photos_status", {}))
     body = json.loads(result.content[0].text)
-    assert body["session"]["state"] == "ok" and body["changes"] == ["albums"]
+    assert body["session"]["state"] == "ok" and body["changes"] == ["albums", "uploads"]
 
 
 def test_typed_error_payload(service, transport):

@@ -4,7 +4,8 @@
 > follows: `list_library` → `photos_list`, `search` → `photos_search`, `list_albums` →
 > `photos_albums`, `get_album` → `photos_list(source="album")`, `get_media_info` →
 > `photos_get`, `get_media` → `photos_view` / `photos_contact_sheet`.
-> `download_media` and `get_storage_quota` are gone (no tool). gpwc is vendored under
+> `download_media` and `get_storage_quota` are gone (no tool); uploads (`photos_upload`,
+> `photos_upload_link`) are photos-mcp's own, see "Uploads". gpwc is vendored under
 > `src/photos_mcp/vendor/gpwc/`; the transport now uses curl_cffi, not `requests`.
 > RPC ids, payloads and field paths below are current; pacing, error handling and
 > caching follow README.md, which is authoritative where they differ.
@@ -176,6 +177,53 @@ Two other download routes exist and are deliberately **not** used:
 * Timestamps and timezone offsets are milliseconds. Coordinates are E7 integers.
 * `Z5xsfc` returns `next page id` as a string; `snAcKc` returns `""` on the last page;
   `nMFwOc`/`zy0IHe` return `null`. All are treated as "no more pages".
+
+## Uploads
+
+Neither gpwc nor GPTK uploads (gpwc has the hash check only). photos-mcp's upload follows what
+photos.google.com's own uploader sent for "Import photos from your computer", recorded from the web
+app (2026-10, build `boq_photosuiserver_20261019`) with a small synthetic PNG; the code is
+`src/photos_mcp/upload.py` and `GoogleTransport.upload_bytes`.
+
+1. **Already there?** `swbisb` (gpwc `payloads.GetRemoteMatchesByHash`, `payloads.py` L85-100;
+   GPTK `getRemoteMatchesByHash`, `api.ts` L171-186) with `[[sha1_base64], null, 3, 0]`, the file's
+   SHA-1 in standard base64 with padding. The answer is `[]` when no item has it, else
+   `[[ [hash, [media_key, [thumb_url, width, height, …], taken_ts, dedup_key, tz_offset_ms,
+   uploaded_ts, …]], … ]]` (gpwc `parser.RemoteMatch`, `parser.py` L137-163). The web app uploads
+   nothing for a match, and neither does photos-mcp.
+2. **Start a resumable upload:** `POST https://photos.google.com/_/upload/uploadmedia/interactive?authuser=0`,
+   no `at` token, with the app's XHR headers (the `rpc` template without `x-same-domain`) and
+
+   | header | value |
+   |---|---|
+   | `x-goog-hash` | `sha1=<sha1_base64>` |
+   | `x-goog-upload-protocol` | `resumable` |
+   | `x-goog-upload-file-name` | the file name (photos-mcp sends `_` for characters outside printable ASCII) |
+   | `x-goog-upload-header-content-length` | the file's size in bytes |
+   | `x-goog-upload-command` | `start` |
+   | `content-type` | `application/x-www-form-urlencoded;charset=UTF-8` (whatever the file is) |
+
+   The body is a 13-byte protobuf for the recorded 468-byte file: `08 02 10 01 18 01 20 01 38 d4 03
+   40 01`, i.e. fields 1=2, 2=1, 3=1, 4=1, 8=1 (meaning unknown) and field 7 = the size as a varint.
+   The answer is `200` with `x-goog-upload-status: active`, `x-goog-upload-url` (the same path with
+   `upload_id` and `upload_protocol=resumable` added) and `x-goog-upload-chunk-granularity: 262144`.
+3. **Send the bytes** to that address: `POST` with `x-goog-hash` and `x-goog-upload-file-name` as
+   above, `x-goog-upload-offset: <bytes sent so far>`, `x-goog-upload-command: upload` for a chunk
+   and `upload, finalize` for the last (the web app sent the small file in one), `content-type:
+   application/x-www-form-urlencoded;charset=utf-8`, the chunk as the body. photos-mcp sends 16 MiB
+   chunks (a multiple of the granularity). Each chunk answers `x-goog-upload-status: active`; the
+   last answers `final` with the **upload token** as the body (base64 text, ~490 characters for
+   the recorded file). Nothing is in the library yet.
+4. **Make the item:** `mdpdU` (batchexecute) with `[[[upload_token, file_name, modified_ms, 2, 2]]]`,
+   where `modified_ms` is the file's last-modified time (the app sends `File.lastModified`; Google
+   uses the file's own EXIF date when it has one) and the two trailing `2`s are the app's (meaning
+   unknown). The answer is `[[[upload_token, record, 0]]]` with `record` in the `swbisb` shape:
+   `record[0]` is the new media key. This is the change: it goes through `GoogleTransport.write`
+   and is never retried after it may have reached Google.
+
+Album placement is a separate change (`E1Cajb` / `laUYf`, as for `photos_album_add`). After an
+upload the app also refreshed its views (`rJ0tlb`, `dIx4uf`, `Z5xsfc`, `EzwWhf`, …); photos-mcp
+only drops its cached pages.
 
 ## Not available from the web API (as far as these sources go)
 

@@ -17,7 +17,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Protocol, TypeVar
+from typing import IO, Any, Protocol, TypeVar
 
 from . import __version__, accounts, rpc
 from .accounts import Account
@@ -28,6 +28,7 @@ from .images import MAX_PX, TILE_MAX, Tile, contact_sheet, to_jpeg
 from .session import Snapshot
 from .state import StateStore
 from .transport import RpcResult
+from .upload import CommitUpload, Staged, parse_created, parse_matches
 from .vendor.gpwc import album_payloads, payloads
 from .vendor.gpwc.payloads import Payload
 
@@ -96,6 +97,8 @@ class Transport(Protocol):
     def rpc(self, payloads: Sequence[Payload]) -> list[RpcResult]: ...
 
     def write(self, payloads: Sequence[Payload]) -> list[RpcResult]: ...
+
+    def upload_bytes(self, source: IO[bytes], *, size: int, name: str, sha1: str) -> str: ...
 
     def fetch_image(self, url: str) -> bytes: ...
 
@@ -669,8 +672,75 @@ class PhotosService:
             "freshness": self._freshness(),
         }
 
+    # -- uploads -------------------------------------------------------------------------------------------------
+
+    def album(self, album_id: str) -> dict[str, Any]:
+        """One album as Google shows it now: {id, url, title, count, shared}."""
+        return self._album_state(_album_key(album_id))
+
+    def upload(self, staged: Staged, album_id: str | None = None, *, check_album: bool = True) -> dict[str, Any]:
+        """Add one photo or video (``staged``, see ``upload.Staging``) to the library, and to an album when one is
+        given, as the web app's uploader does: a file the library already holds (the same bytes) is not sent again.
+
+        With ``check_album`` the album is read first (a wrong one fails before anything is sent) and again afterwards
+        (``added``); an upload link checked its album when it was made and skips both reads for each file."""
+        key = _album_key(album_id) if album_id is not None else None
+        before = self._album_state(key) if key and check_album else None
+        self.state.take("write", 2 if key else 1)
+        matches = parse_matches(self._one(payloads.GetRemoteMatchesByHash([staged.sha1]), required=False))
+        existing = matches[0] if matches else None
+        if existing is None:
+            token = self._t.upload_bytes(staged.file, size=staged.size, name=staged.name, sha1=staged.sha1)
+            (created,) = self._write(
+                [CommitUpload(token, staged.name, staged.modified_ms)], action="upload", album=None, items=1
+            )
+            stored = parse_created(created)
+            name: str | None = staged.name
+        else:
+            stored = existing
+            name = self._filenames([stored.media_key]).get(stored.media_key)
+        album = self._add_uploaded(key, stored.media_key, before) if key else None
+        return {
+            "item": {
+                "id": stored.media_key,
+                "url": PHOTO_URL.format(stored.media_key),
+                "type": staged.media.type,
+                "filename": name,
+                "taken_at": rpc.iso_time(stored.taken_ts, stored.tz_offset),
+                "tz_known": rpc.tz_known(stored.tz_offset),
+                "width": stored.width,
+                "height": stored.height,
+                "uploaded_at": rpc.utc_time(stored.uploaded_ts),
+            },
+            "already_in_library": existing is not None,
+            "size_bytes": staged.size,
+            "album": album,
+            "freshness": self._freshness(),
+        }
+
+    def _add_uploaded(self, key: str, media_key: str, before: dict[str, Any] | None) -> dict[str, Any]:
+        """Put a just-uploaded item in its album. The item exists whatever happens here, so a failure is the album's
+        own error in the result, never the upload's."""
+        try:
+            shared = before["shared"] if before is not None else self._is_shared(key)
+            payload = (
+                album_payloads.AddItemsToExistingSharedAlbum([media_key], key)
+                if shared
+                else album_payloads.AddItemsToExistingAlbum([media_key], key)
+            )
+            (data,) = self._write([payload], action="add", album=key, items=1)
+            if data is None:
+                raise PhotosError("refused", log_detail=f"{payload.rpcid} returned no data")
+            if before is None:
+                return {"id": key, "url": ALBUM_URL.format(key), "added": None}
+            after = self._album_state(key)
+            return {**after, "added": _difference(after.get("count"), before.get("count"))}
+        except PhotosError as exc:
+            log.info("upload: the item is in the library, the album step failed (%s)", exc.code)
+            return {"id": key, "url": ALBUM_URL.format(key), "added": 0, "error": exc.payload()}
+
     def _write(self, requests: list[Payload], *, action: str, album: str | None, items: int) -> list[Any]:
-        """Send album changes; every outcome goes to the audit log. Caches of album pages are dropped."""
+        """Send changes; every outcome goes to the audit log. Cached pages are dropped (they no longer hold)."""
         try:
             results = self._t.write(requests)
         except PhotosError as exc:
@@ -681,7 +751,7 @@ class PhotosService:
         by_id = {r.payload_id: r for r in results}
         data = [by_id[p.payload_id].data if p.payload_id in by_id else None for p in requests]
         self._forget_pages()
-        if any(d is None for d in data) and action == "create":
+        if any(d is None for d in data) and action in ("create", "upload"):
             self.state.audit({"action": action, "album": album, "items": items, "outcome": "refused"})
             raise PhotosError("refused", log_detail=f"{requests[0].rpcid} returned no data")
         self.state.audit({"action": action, "album": album, "items": items, "outcome": "sent"})
@@ -822,8 +892,9 @@ class PhotosService:
         out = {
             "service": "photos-mcp",
             "version": __version__,
-            # The only changes this server makes: albums (create, add, remove). Nothing deletes or edits media.
-            "changes": ["albums"],
+            # The only changes this server makes: albums (create, add, remove) and uploads. Nothing deletes or edits
+            # media.
+            "changes": ["albums", "uploads"],
             "session": session,
             "breaker": state["breaker"],
             "budgets": state["budgets"],

@@ -1,4 +1,4 @@
-"""Read-only RPC payload builders (gpwc ``payloads.py`` at 651aa268, trimmed; see README.md).
+"""RPC payload builders for reads (gpwc ``payloads.py`` at 651aa268, trimmed; see README.md).
 
 Each payload carries its RPC id and the ``data`` list exactly as the Google Photos web app
 sends it. ``payload_id`` is assigned when a batch is framed (``Client.build_request``).
@@ -52,6 +52,15 @@ class GetFavoritesPage(Payload):
         super().__init__()
         self.rpcid = "EzkLib"
         self.data = ["Favorites", [[5, "8", 0, 9]], page_id]
+
+
+class GetRemoteMatchesByHash(Payload):
+    """Which of these SHA-1 hashes (base64) the library already holds; an upload checks first, as the web app does."""
+
+    def __init__(self, hashes: list[str]):
+        super().__init__()
+        self.rpcid = "swbisb"
+        self.data = [hashes, None, 3, 0]
 
 
 class GetItemInfo(Payload):

@@ -21,13 +21,17 @@ Modifications for photos-mcp (2026-10-14):
   `GetSearchPage` (`EzkLib`), `GetBatchMediaInfo` (`EWgK9e`), `GetAlbumsPage` (`Z5xsfc`),
   `GetAlbumPage` (`snAcKc`), `GetItemInfo` (`VrseUb`), `GetItemInfoExt` (`fDcn4b`) and
   `GetStorageQuota` (`EzwWhf`) remain, plus (photos-mcp 0.5, from the same gpwc commit)
-  `GetLibraryPageByUploadedDate` and `GetFavoritesPage`, two filters of the search RPC `EzkLib`. Every write builder (trash, albums, favourites,
-  sharing, archive, uploads, ...) was removed, as were `parser.py` and the
+  `GetLibraryPageByUploadedDate` and `GetFavoritesPage`, two filters of the search RPC `EzkLib`, and (photos-mcp
+  0.7) `GetRemoteMatchesByHash` (`swbisb`), which an upload asks first. Every write builder (trash, albums, favourites,
+  sharing, archive, ...) was removed, as were `parser.py` and the
   `parse_response` / `execute` helpers; photos-mcp parses responses in `photos_mcp.rpc`.
 - **Payload ids** follow the web app: `"generic"` for a single RPC, `"1"`, `"2"`, ... in
   a batch (upstream used random hex ids).
 
-Album changes (photos-mcp 0.6): `album_payloads.py` holds the only write builders, from the same gpwc commit
+Album changes (photos-mcp 0.6): `album_payloads.py` holds the only vendored write builders, from the same gpwc commit
 (`CreateAlbum` `OXvT9d`, `AddItemsToExistingAlbum` `E1Cajb`, `AddItemsToExistingSharedAlbum` `laUYf`,
 `RemoveItemsFromAlbum` `ycV3Nd`) and Google-Photos-Toolkit's `removeItemsFromSharedAlbum` (`LjmOue`). The transport
 sends them only through `GoogleTransport.write`, whose allowlist is exactly these five RPC ids.
+
+Uploads (photos-mcp 0.7) are not from gpwc, which has none: the upload endpoint and `CommitUpload` (`mdpdU`) were
+recorded from photos.google.com's own uploader and live in `photos_mcp/upload.py` (docs/PAYLOADS.md "Uploads").
