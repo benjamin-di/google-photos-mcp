@@ -493,13 +493,14 @@ sign in on Google's own page in their browser, phone or computer.
 - **The window.** The page shows Google's sign-in page, running in that account's profile on a
   virtual display, through [noVNC](https://github.com/novnc/noVNC) relayed by the server.
   Nothing on the sign-in is automated: the person does every step, Google's own checks
-  included. Passkeys do not work in a remote window (they are turned off there): sign in with
-  the password and the code or prompt Google asks for.
+  included. Passkeys do not work in a remote window (they are hidden there, so Google does not
+  offer them): sign in with the password and the code or prompt Google asks for.
 - **The window is locked down**, because the login service keeps every further account's
-  profile and snapshot: Chromium runs under a managed policy (`src/photos_login/chromium-policy.json`,
-  installed by the image) that refuses `file://`, `chrome://`, `view-source:`, `data:` and
-  DevTools pages, file dialogs, downloads, printing and saved passwords, and top-level pages
-  are limited to Google's sign-in hosts. The service opens no window without the policy
+  profile and snapshot: Chromium runs in kiosk mode (no address bar, tabs or menus) under
+  [signin-window](https://github.com/benjamin-di/signin-window)'s managed policy (installed by
+  the image) that refuses `file://`, `chrome://`, `view-source:`, `data:` and DevTools pages,
+  file dialogs, downloads, printing and offers to save the password, and top-level pages are
+  limited to Google's sign-in hosts. The service opens no window without the policy
   (`PHOTOS_LOGIN_UNMANAGED_BROWSER=1` overrides that, for trying it out on a computer of your
   own only). The live view works only while the profile is shown signed out on Google's
   sign-in page: a profile that is still signed in is checked, and exported, with nobody

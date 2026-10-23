@@ -61,13 +61,11 @@ RUN uv pip install --system --compile-bytecode --require-hashes -r /tmp/requirem
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE NOTICE THIRD_PARTY_NOTICES ./
 COPY src ./src
-# The managed Chromium policy that keeps a sign-in window from local files, DevTools and downloads (every account's
-# profile and snapshot lives in this container); the service opens no window without it (src/photos_login/window.py).
+# The managed Chromium policy (signin-window's) that keeps a sign-in window from local files, DevTools, downloads and
+# offers to save the password (every account's profile and snapshot lives in this container); the service opens no
+# window without it (src/photos_login/window.py).
 RUN uv pip install --system --compile-bytecode --no-deps . \
- && for dir in /etc/opt/chrome_for_testing/policies/managed /etc/chromium/policies/managed; do \
-      install -d -m 0755 "$dir" \
-      && install -m 0644 src/photos_login/chromium-policy.json "$dir/photos-mcp-login.json"; \
-    done \
+ && python -m signin_window.browser install-policy \
  && rm -rf /app/src
 
 RUN python -c "from pathlib import Path; import patchright; p = Path(patchright.__file__).parent / 'driver' / 'node'; p.unlink(); p.symlink_to('/usr/local/bin/browser-node')" \

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -464,7 +464,7 @@ server = [
 
 [[package]]
 name = "google-photos-mcp"
-version = "0.9.6"
+version = "0.9.7"
 source = { editable = "." }
 dependencies = [
     { name = "curl-cffi" },
@@ -495,7 +495,7 @@ requires-dist = [
     { name = "patchright", marker = "extra == 'login'", specifier = "==1.61.2" },
     { name = "pillow", specifier = ">=12.0" },
     { name = "playwright", marker = "extra == 'session'", specifier = ">=1.55" },
-    { name = "signin-window", specifier = ">=0.1.6,<0.2" },
+    { name = "signin-window", specifier = ">=0.2.0,<0.3" },
     { name = "tzdata", specifier = ">=2025.2" },
 ]
 provides-extras = ["session", "login"]
@@ -1526,16 +1526,16 @@ wheels = [
 
 [[package]]
 name = "signin-window"
-version = "0.1.6"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "starlette" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/52/fe332d77dec304829a14534e13c7456504104baf12b5edf9f0cec1edc6c0/signin_window-0.1.6.tar.gz", hash = "sha256:5b50afce579b0474ef99fafb9b82049c525d1c40ecf9d3a8a322e29d17e46dd5", size = 87122, upload-time = "2026-10-23T06:31:28.629Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/cf/1dfa26d350dc0dcb7b920c24d0b64acaa515ba692ee73e64498aebd2ec39/signin_window-0.2.0.tar.gz", hash = "sha256:c0d1250bfa41bc4590889f77c4c9a38ad60150db4869e7789339eb7a8c657887", size = 96669, upload-time = "2026-10-23T10:34:59.826Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/1b/fa5e52fae8871b6422ef3bbfae3b44b37ccd466856124a858b4d9e7bd671/signin_window-0.1.6-py3-none-any.whl", hash = "sha256:b301a1f0b63a690779fd13c7afab3d56a0df9c1b5698fabe8f7ba13b85a97c5e", size = 36150, upload-time = "2026-10-23T06:31:25.998Z" },
+    { url = "https://files.pythonhosted.org/packages/65/e3/ee31ec70ce7057e20802171cbcaf1ee4485e3f58b9498f98403fc1d06dde/signin_window-0.2.0-py3-none-any.whl", hash = "sha256:68f6e44b21c4b2c393d4866e5bcec8956cf7d13f386df7dd0b7da9769b564eb7", size = 40913, upload-time = "2026-10-23T10:34:58.56Z" },
 ]
 
 [[package]]

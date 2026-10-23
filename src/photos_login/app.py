@@ -61,7 +61,7 @@ def start_params(require_policy: bool):  # type: ignore[no-untyped-def]
         if not valid_id(account) or taken is None or (email is not None and not _emails([email])):
             raise ValueError("invalid")
         if require_policy and not policy_installed():
-            log.error("no sign-in window: the managed Chromium policy is not installed (window.POLICY_DIRS)")
+            log.error("no sign-in window: the managed Chromium policy is not installed (signin_window.browser)")
             raise ValueError("policy")
         email = email.strip().lower() if isinstance(email, str) else None
         return {"account": account, "key": account, "email": email, "taken": taken}
@@ -140,7 +140,7 @@ def main() -> None:
     # Only for trying it out without the image: the window can then reach local files (window.py).
     unmanaged = (os.environ.get("PHOTOS_LOGIN_UNMANAGED_BROWSER") or "").strip() == "1"
     if not unmanaged and not policy_installed():
-        log.error("the managed Chromium policy is not installed: sign-in windows stay closed (window.POLICY_DIRS)")
+        log.error("the managed Chromium policy is not installed: sign-in windows stay closed (signin_window.browser)")
     windows = Windows(
         SignIn(paths, require_policy=not unmanaged),
         slots=1,

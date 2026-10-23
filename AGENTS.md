@@ -23,10 +23,10 @@ Google account authority.
 The login service (`src/photos_login`) shows Google's sign-in page to a person and automates
 nothing on it: no click, keystroke or fill exists there (`tests/test_login_service.py` checks
 it statically). It never returns a session over its API. It holds every further account's
-profile and snapshot, so its window must stay locked down: the managed Chromium policy
-(`chromium-policy.json`; DevTools stays allowed in it because `DeveloperToolsAvailability=2`
-also closes the pipe the window is driven through), the top-level page allowlist, and the live
-view only in state `waiting`. `scripts/login_e2e.py` checks the policy in the image. The windows' service, the sign-in
+profile and snapshot, so its window must stay locked down: signin-window's locked-down browser
+(`signin_window.browser`: kiosk mode, its managed Chromium policy, passkeys hidden; DevTools stays
+allowed in the policy because `DeveloperToolsAvailability=2` also closes the pipe the window is
+driven through), the top-level page allowlist, and the live view only in state `waiting`. `scripts/login_e2e.py` checks the policy in the image. The windows' service, the sign-in
 links' relay and the paste add-on come from [signin-window](https://github.com/benjamin-di/signin-window): fix them
 there; this repository holds Google's window, the runner and what a sign-in binds.
 Browser-level behaviour is covered by `scripts/login_e2e.py`, which the release runs in the

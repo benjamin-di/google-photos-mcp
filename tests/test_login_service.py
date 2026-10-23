@@ -170,29 +170,33 @@ def test_a_failed_window_keeps_a_kept_accounts_profile(paths):
     assert paths.profile("second").is_dir() and paths.keeper("second")["state"] == SIGNED_IN
 
 
-def test_no_window_without_the_browser_policy(paths, tmp_path, monkeypatch):
+def test_no_window_without_the_browser_policy(paths, monkeypatch):
     # The window could otherwise open file:// pages: every other account's profile and snapshot is in this container.
-    monkeypatch.setattr(window, "POLICY_DIRS", (tmp_path / "policies",))
+    from photos_login import app as login_app
+
+    monkeypatch.setattr(login_app, "policy_installed", lambda: False)
     script = Script(paths)
     _, client = service(paths, script, require_policy=True)
     with client:
         body = {"account": "second", "layout": "desktop", "taken": []}
         assert client.post("/logins", json=body, headers=AUTH).status_code == 400
     assert script.calls == []
-    (tmp_path / "policies").mkdir()
-    (tmp_path / "policies" / window.POLICY_NAME).write_text(json.dumps(window.POLICY))
-    assert window.policy_installed()
-    partial = {**window.POLICY, "URLBlocklist": ["chrome://*"]}  # without file://: not ours
-    (tmp_path / "policies" / window.POLICY_NAME).write_text(json.dumps(partial))
-    assert not window.policy_installed()
+    monkeypatch.setattr(window, "policy_installed", lambda: False)
+    with pytest.raises(window.PolicyMissing):
+        window.sign_in(profile=paths.profile("second"), session_dir=paths.session("second"), layout="desktop",
+                       env={}, email=None, taken=[], min_generation=0, cancel=threading.Event(), deadline=0.0,
+                       on_state=lambda state, host: None)  # fmt: skip
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.login").read_text()
+    assert "python -m signin_window.browser install-policy" in dockerfile
 
 
 def test_the_policy_closes_local_pages_and_tools():
-    policy = window.POLICY
+    from signin_window.browser import POLICY as policy
+
     for scheme in ("file://*", "chrome://*", "devtools://*", "view-source:*", "data:*", "blob:*"):
         assert scheme in policy["URLBlocklist"], scheme
     # DeveloperToolsAvailability=2 would also close the debugging pipe the window is driven through; DevTools
-    # stays useless without its devtools:// pages and file dialogs.
+    # stays useless without its devtools:// pages and file dialogs, and kiosk mode keeps it closed.
     assert "DeveloperToolsAvailability" not in policy and policy["AllowFileSelectionDialogs"] is False
     assert policy["DownloadRestrictions"] == 3 and policy["PasswordManagerEnabled"] is False
     assert not any(entry.startswith("http") for entry in policy["URLBlocklist"])  # Google's own pages still load
@@ -463,5 +467,10 @@ def test_the_window_shows_only_googles_sign_in_pages():
         assert not window.allowed_document(url), url
 
 
-def test_passkeys_are_off_in_the_window():
-    assert any("WebAuthentication" in arg for arg in window.LAUNCH_ARGS)
+def test_the_window_is_a_kiosk_without_passkeys():
+    import inspect
+
+    assert "--kiosk" in window.LAUNCH_ARGS
+    source = inspect.getsource(window.sign_in)
+    assert "harden_sync(context)" in source and "top_level(request)" in source
+    assert "harden_sync" not in inspect.getsource(window.refresh)  # nobody watches a refresh

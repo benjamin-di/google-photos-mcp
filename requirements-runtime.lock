@@ -795,9 +795,9 @@ secretstorage==3.5.0 ; sys_platform == 'linux' \
     --hash=sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137 \
     --hash=sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be
     # via keyring
-signin-window==0.1.6 \
-    --hash=sha256:5b50afce579b0474ef99fafb9b82049c525d1c40ecf9d3a8a322e29d17e46dd5 \
-    --hash=sha256:b301a1f0b63a690779fd13c7afab3d56a0df9c1b5698fabe8f7ba13b85a97c5e
+signin-window==0.2.0 \
+    --hash=sha256:68f6e44b21c4b2c393d4866e5bcec8956cf7d13f386df7dd0b7da9769b564eb7 \
+    --hash=sha256:c0d1250bfa41bc4590889f77c4c9a38ad60150db4869e7789339eb7a8c657887
     # via google-photos-mcp
 sse-starlette==3.5.0 \
     --hash=sha256:3e6e1070df3f0f5d9cea81496de92dbb72f6721871d99748ece67441dd8b7997 \

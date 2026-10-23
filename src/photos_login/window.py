@@ -5,9 +5,11 @@ The sign-in window shows Google's own sign-in page and automates nothing on it: 
 checks included (``tests/test_login_service.py`` pins that). The login service keeps every further account's profile
 and snapshot, so the window must not become a way to reach them, or anything but Google's sign-in:
 
-* Chromium runs under the managed policy ``chromium-policy.json`` (installed by the image, checked before a window
-  opens): no ``file://``, ``chrome://``, ``view-source:``, ``data:`` or DevTools, no file dialogs, downloads,
-  printing or saved passwords.
+* Chromium is signin-window's locked-down browser (``signin_window.browser``): kiosk mode (no address bar, tabs or
+  menus), its managed policy (installed by the image, checked before a window opens: no ``file://``, ``chrome://``,
+  ``view-source:``, ``data:`` or DevTools pages, no file dialogs, downloads, printing or offers to save the password),
+  and in the sign-in window passkeys hidden from Google's pages (none can work there) and no tab or window from
+  Ctrl+T or Ctrl+N.
 * Top-level pages are limited to Google's sign-in hosts (``allowed_document``).
 * The live view is offered only while the profile is shown signed out on Google's sign-in page (state ``waiting``):
   a profile that is still signed in is checked, and later exported, with nobody watching.
@@ -20,15 +22,17 @@ the keeper.
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping
-from importlib import resources
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from signin_window.browser import LAUNCH_ARGS as KIOSK
+from signin_window.browser import harden_sync, policy_installed
+from signin_window.hosts import top_level
 
 from photos_mcp.session_export import export_from_context, page_email, settled_url, signed_out_page
 
@@ -36,16 +40,8 @@ APP_URL = "https://photos.google.com/"
 APP_HOST = "photos.google.com"
 SIGN_IN_URL = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fphotos.google.com%2F"
 LAYOUTS = {"desktop": (1280, 860), "phone": (430, 900)}
-# Passkeys cannot work in a remote window (no device near the server): with WebAuthn off, Google offers the
-# password and the other ways instead. The same browser identity serves the sign-in and every refresh.
-LAUNCH_ARGS = (
-    "--no-first-run",
-    "--disable-features=Translate,WebAuthentication,WebAuthenticationPasskeysUI,WebAuthCable,WebAuthnConditionalUI",
-)
-# Where Chromium (Chrome for Testing, as patchright installs it, and distribution builds) reads managed policies.
-POLICY_DIRS = (Path("/etc/opt/chrome_for_testing/policies/managed"), Path("/etc/chromium/policies/managed"))
-POLICY_NAME = "photos-mcp-login.json"
-POLICY = json.loads(resources.files("photos_login").joinpath("chromium-policy.json").read_text(encoding="utf-8"))
+# The same browser identity, and window, serves the sign-in and every refresh.
+LAUNCH_ARGS = ("--no-first-run", "--disable-features=Translate", *KIOSK)
 # The pages a sign-in may pass through: Google's sign-in, its consent and account-notice pages, the hops that set
 # the same sign-in on youtube.com and Google's country domains, the signed-out landing page, and Google Photos.
 _SIGN_IN_HOSTS = frozenset(
@@ -83,18 +79,6 @@ class NotViewable(Exception):
 
 class PolicyMissing(Exception):
     """The managed Chromium policy is not installed: no window opens without it."""
-
-
-def policy_installed() -> bool:
-    """Whether a managed policy file with at least our URL blocklist is installed where Chromium reads it."""
-    for folder in POLICY_DIRS:
-        try:
-            installed = json.loads((folder / POLICY_NAME).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(installed, dict) and set(POLICY["URLBlocklist"]) <= set(installed.get("URLBlocklist") or ()):
-            return True
-    return False
 
 
 def allowed_document(url: str) -> bool:
@@ -188,11 +172,11 @@ def sign_in(
     with _playwright() as playwright:
         context = launch(playwright, profile, layout, env)
         try:
+            harden_sync(context)  # passkeys hidden; Ctrl+T and Ctrl+N open nothing
 
             def guard(route: Any) -> None:
                 request = route.request
-                top = request.is_navigation_request() and request.frame.parent_frame is None
-                if top and not allowed_document(request.url):
+                if top_level(request) and not allowed_document(request.url):
                     route.abort()
                     return
                 route.continue_()
