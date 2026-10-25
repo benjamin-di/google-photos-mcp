@@ -1,0 +1,82 @@
+[
+  {
+    "name": "SID",
+    "value": "fake-sid",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": 1830000000,
+    "secure": false
+  },
+  {
+    "name": "__Secure-1PSID",
+    "value": "fake-secure-1psid",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": 1830000000.5,
+    "secure": true
+  },
+  {
+    "name": "NID",
+    "value": "fake-nid",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": 1810000000,
+    "secure": true
+  },
+  {
+    "name": "OSID",
+    "value": "fake-osid-photos",
+    "domain": "photos.google.com",
+    "path": "/",
+    "expires": 1830000000,
+    "secure": true
+  },
+  {
+    "name": "__Secure-OSID",
+    "value": "fake-secure-osid-photos",
+    "domain": "photos.google.com",
+    "path": "/",
+    "expires": 1830000000,
+    "secure": true
+  },
+  {
+    "name": "OSID",
+    "value": "fake-osid-cdn",
+    "domain": "photos.fife.usercontent.google.com",
+    "path": "/",
+    "expires": -1,
+    "secure": true
+  },
+  {
+    "name": "__Secure-OSID",
+    "value": "fake-secure-osid-cdn",
+    "domain": "photos.fife.usercontent.google.com",
+    "path": "/",
+    "expires": -1,
+    "secure": true
+  },
+  {
+    "name": "AEC",
+    "value": "not-exported",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": 1830000000,
+    "secure": true
+  },
+  {
+    "name": "SID",
+    "value": "not-exported",
+    "domain": ".youtube.com",
+    "path": "/",
+    "expires": 1830000000,
+    "secure": true
+  },
+  {
+    "name": "OSID",
+    "value": "not-exported",
+    "domain": "myaccount.google.com",
+    "path": "/",
+    "expires": 1830000000,
+    "secure": true
+  }
+]

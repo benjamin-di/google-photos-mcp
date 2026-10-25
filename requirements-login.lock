@@ -551,6 +551,7 @@ pydantic==2.14.1 \
     #   mcp-types
     #   openapi-pydantic
     #   pydantic-settings
+    #   signin-window
 pydantic-core==2.50.1 \
     --hash=sha256:0036473f5583e6a60e50b8b21651511564277a3f05cc5dab8cf579f552cd5f6c \
     --hash=sha256:009634b83993777ddcd69cad0ffcace43dabde692109528e35f0fde91e386a8b \
@@ -871,9 +872,9 @@ secretstorage==3.5.0 ; sys_platform == 'linux' \
     --hash=sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137 \
     --hash=sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be
     # via keyring
-signin-window==0.3.0 \
-    --hash=sha256:180fb28378146cf1b22cad05fe173def4dbb45059e031687bc74e76b2cd64ad0 \
-    --hash=sha256:517985984196f3d19fc413e108b5484780099a6b82c41fbb697a279eee980a6a
+signin-window==0.4.2 \
+    --hash=sha256:33aab922616142d3987709664efe4d704ea10267218e8e53a92a8eb2b6689475 \
+    --hash=sha256:e9aeeb263ed26e0587c48e42857f32e769709726172663ea8f8676934c0647cb
     # via google-photos-mcp
 sse-starlette==3.5.0 \
     --hash=sha256:3e6e1070df3f0f5d9cea81496de92dbb72f6721871d99748ece67441dd8b7997 \

@@ -1,0 +1,8 @@
+# Netscape HTTP Cookie File
+.google.com	TRUE	/	TRUE	1810000000	NID	fake-nid
+.google.com	TRUE	/	FALSE	1830000000	SID	fake-sid
+.google.com	TRUE	/	TRUE	1830000000	__Secure-1PSID	fake-secure-1psid
+photos.fife.usercontent.google.com	FALSE	/	TRUE	0	OSID	fake-osid-cdn
+photos.fife.usercontent.google.com	FALSE	/	TRUE	0	__Secure-OSID	fake-secure-osid-cdn
+photos.google.com	FALSE	/	TRUE	1830000000	OSID	fake-osid-photos
+photos.google.com	FALSE	/	TRUE	1830000000	__Secure-OSID	fake-secure-osid-photos

@@ -1,0 +1,159 @@
+key = "google"
+login_url = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fphotos.google.com%2F"
+allowed_origins = ["https://accounts.google.com", "https://photos.google.com"]
+identity_hosts = ["accounts.google.com"]
+warm_url = "https://photos.google.com/"
+# A library tile; opening one loads an image from the CDN host, which mints the
+# host-only OSID cookies that host needs.
+image_host = "photos.fife.usercontent.google.com"
+library_tile_selectors = ["a[href*='/photo/']"]
+# Post-login account interstitials (for example "Add a profile picture") live
+# under accounts.google.com/web/ and are dismissed, never answered.
+interstitial_path_prefixes = ["/web/"]
+interstitial_skip_selectors = [
+  "button:has-text('Skip')",
+  "a:has-text('Skip')",
+  "div[role='button']:has-text('Skip')",
+  "button:has-text('Not now')",
+  "a:has-text('Not now')",
+  "div[role='button']:has-text('Not now')",
+]
+export_hosts = ["google.com", "photos.google.com", "photos.fife.usercontent.google.com"]
+export_names = [
+  "SID", "HSID", "SSID", "APISID", "SAPISID", "SIDCC", "NID",
+  "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+  "__Secure-1PAPISID", "__Secure-3PAPISID", "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+  "OSID", "__Secure-OSID",
+]
+
+[launch]
+locale = "en-GB"
+timezone_id = "UTC"
+accept_language = "en-GB,en;q=0.9"
+args = ["--disable-features=WebAuthentication,WebAuthenticationPasskeysUI,WebAuthCable,WebAuthnConditionalUI"]
+
+[google_identity.controls]
+use_another = ["div[role='link']:has-text('Use another account')", "li:has-text('Use another account')", "text=Use another account"]
+account_choices = ["[data-identifier]", "div[data-email]", "li div[role='link']", "div[role='link']"]
+email = ["#identifierId", "input[name='identifier']", "input[autocomplete='username']"]
+password = ["input[name='Passwd']", "input[type='password']", "input[autocomplete='current-password']"]
+totp = ["input[name='totpPin']", "#totpPin", "input[autocomplete='one-time-code']", "input[type='tel']"]
+email_submit = [
+  "form:has(#identifierId) button[type='submit']",
+  "form:has(input[name='identifier']) button[type='submit']",
+  "#identifierNext",
+  "button:has-text('Next')",
+  "div[role='button']:has-text('Next')",
+]
+password_submit = [
+  "form:has(input[name='Passwd']) button[type='submit']",
+  "form:has(input[type='password']) button[type='submit']",
+  "#passwordNext",
+  "button:has-text('Next')",
+  "div[role='button']:has-text('Next')",
+]
+totp_submit = [
+  "form:has(input[name='totpPin']) button[type='submit']",
+  "form:has(#totpPin) button[type='submit']",
+  "form:has(input[autocomplete='one-time-code']) button[type='submit']",
+  "#totpNext",
+  "button:has-text('Next')",
+  "div[role='button']:has-text('Next')",
+]
+alternate = ["button:has-text('Try another way')", "div[role='button']:has-text('Try another way')", "span:has-text('Try another way')", "div[role='link']:has-text('Try another way')", "[data-action='secondaryaction']:has-text('Try another way')", "a:has-text('Try another way')", "button:has-text('More ways to verify')", "div[role='button']:has-text('More ways to verify')", "button:has-text('Other options')"]
+password_choice = ["button:has-text('Enter your password')", "div[role='link']:has-text('Enter your password')", "div[role='button']:has-text('Enter your password')", "li:has-text('Enter your password')", "div[role='button']:has-text('Use your password')", "li:has-text('Use your password')", "div[data-challengeid]:has-text('password')", "[data-challengeid='5']"]
+totp_choice = [
+  "div[role='link']:has-text('Google Authenticator')",
+  "div[role='button']:has-text('Google Authenticator')",
+  "li:has-text('Google Authenticator')",
+  "div[role='link']:has-text('Authenticator')",
+  "div[role='button']:has-text('Authenticator')",
+  "li:has-text('Authenticator')",
+  "div[role='link']:has-text('authenticator app')",
+  "div[role='button']:has-text('authenticator app')",
+  "li:has-text('authenticator app')",
+  "div[role='link']:has-text('Get a verification code')",
+  "div[role='button']:has-text('Get a verification code')",
+  "li:has-text('Get a verification code')",
+  "div[role='link']:has-text('verification code')",
+  "div[role='button']:has-text('verification code')",
+  "li:has-text('verification code')",
+  # Current Google "Verify it's you" method list uses this offline-code wording
+  # for the Authenticator/app code path (not SMS, not phone-tap).
+  "div[role='link']:has-text('phone or tablet to get a security code')",
+  "div[role='button']:has-text('phone or tablet to get a security code')",
+  "li:has-text('phone or tablet to get a security code')",
+  "div[role='link']:has-text('get a security code')",
+  "div[role='button']:has-text('get a security code')",
+  "li:has-text('get a security code')",
+  "div[role='link']:has-text('security code')",
+  "div[role='button']:has-text('security code')",
+  "li:has-text('security code')",
+  "[data-challengeid='6']",
+  "[data-challengetype='6']",
+  "div[data-challengeid='6']",
+  "div[jsname]:has-text('Authenticator')",
+]
+consent = ["button:has-text('Continue')", "button:has-text('Allow')", "button:has-text('Confirm')"]
+
+[google_identity.observations.email_visible]
+any_selectors = ["#identifierId", "input[name='identifier']", "input[autocomplete='username']"]
+absent_selectors = ["input[name='Passwd']", "input[type='password']", "input[autocomplete='current-password']"]
+
+[google_identity.observations.password_visible]
+any_selectors = ["input[name='Passwd']", "input[type='password']", "input[autocomplete='current-password']"]
+
+[google_identity.observations.totp_visible]
+any_selectors = ["input[name='totpPin']", "#totpPin", "input[autocomplete='one-time-code']"]
+
+[google_identity.observations.account_chooser]
+any_path_contains = ["accountchooser"]
+any_text = ["use another account"]
+
+[google_identity.observations.alternate_visible]
+any_text = ["try another way", "more ways to verify"]
+
+[google_identity.observations.password_choice]
+any_text = ["enter your password", "use your password"]
+
+[google_identity.observations.totp_choice]
+any_text = [
+  "google authenticator",
+  "authenticator app",
+  "get a verification code",
+  "from the google authenticator",
+  "authentication app",
+  # Modern multi-method chooser heading/rows for offline Authenticator codes.
+  "choose a way to verify",
+  "phone or tablet to get a security code",
+  "get a security code",
+  "security code",
+  "even if it's offline",
+  "even if it is offline",
+]
+
+[google_identity.observations.consent_visible]
+any_selectors = ["button"]
+required_text = ["continue", "allow", "confirm"]
+absent_selectors = ["#identifierId", "input[name='identifier']", "input[name='Passwd']", "input[type='password']", "input[name='totpPin']", "#totpPin", "input[autocomplete='one-time-code']"]
+# Passkey prompts also expose a Continue button without credential fields.
+# They are handled via alternate_visible / unsupported_second_factor, not GIS
+# consent. Keep consent narrowly for OAuth allow screens only.
+
+[google_identity.observations.credential_rejected]
+any_text = ["wrong password", "couldn't find your google account", "wrong code"]
+
+[google_identity.observations.account_alert]
+any_text = ["account disabled", "suspicious activity"]
+
+[google_identity.observations.unsupported_second_factor]
+# These markers describe individual unsupported methods. A multi-method
+# "choose a way to verify" page may list them beside Authenticator; the
+# adapter only fails closed when no supported totp/password/alternate path
+# is also observed.
+any_text = [
+  "tap yes on your phone",
+  "get a verification code by text",
+  "use your passkey",
+  "fingerprint, face, or screen lock",
+]

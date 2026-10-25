@@ -34,6 +34,7 @@ RUN apt-get update && apt-get upgrade -y --no-install-recommends \
       curl \
       dumb-init \
       fonts-noto-cjk \
+      openssh-client \
       x11vnc \
       xvfb \
  && rm -rf /var/lib/apt/lists/*

@@ -136,6 +136,7 @@ jobs:
           # End to end, offline, with a stand-in page instead of Google's (scripts/login_e2e.py).
           timeout 300 docker run --rm --network none -v "$PWD/scripts/login_e2e.py:/tmp/login_e2e.py:ro" \
             --entrypoint python "$candidate" /tmp/login_e2e.py
+          bash scripts/check-maintenance-image.sh "$candidate"
           docker buildx imagetools create -t "$IMAGE:$version" -t "$IMAGE:latest" "$candidate"
 
   github-release:

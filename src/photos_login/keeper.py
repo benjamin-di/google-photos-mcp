@@ -19,6 +19,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from signin_window.sessions import refresh_due
+
 from photos_mcp.session_export import ExportError, unpublish
 
 from . import window
@@ -72,12 +74,15 @@ class Keeper:
         checked = data.get("checked_at")
         if not isinstance(checked, int | float):
             return True
-        age = self._clock() - checked
         with self._lock:
             requested = account in self._requested
-        if requested and age >= REQUEST_GAP:
-            return True
-        return age >= (self.retry if data.get("state") == ERROR else self.every)
+        return refresh_due(
+            checked,
+            now=self._clock(),
+            interval=self.retry if data.get("state") == ERROR else self.every,
+            requested=requested,
+            request_gap=REQUEST_GAP,
+        )
 
     def round(self) -> None:
         for account in self.paths.kept():

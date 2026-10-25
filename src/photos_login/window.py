@@ -31,7 +31,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from signin_window.browser import LAUNCH_ARGS as KIOSK
-from signin_window.browser import harden_sync, policy_installed
+from signin_window.browser import browser_environment, harden_sync, policy_installed
 from signin_window.hosts import top_level
 
 from photos_mcp.session_export import export_from_context, page_email, settled_url, signed_out_page
@@ -109,7 +109,7 @@ def launch(playwright: Any, profile: Path, layout: str, env: Mapping[str, str]) 
         str(profile),
         headless=False,
         no_viewport=True,
-        env=dict(env),
+        env=browser_environment(env),
         args=[f"--window-size={width},{height}", "--window-position=0,0", *LAUNCH_ARGS],
     )
 

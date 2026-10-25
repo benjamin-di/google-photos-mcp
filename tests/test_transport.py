@@ -515,31 +515,37 @@ def test_signed_out_probe_sends_no_cookie_and_follows_nothing(tmp_path, clock):
 
 
 def test_image_fetches_run_up_to_four_at_a_time(tmp_path, clock):
-    import time
+    from concurrent.futures import ThreadPoolExecutor
 
     active, peak = [0], [0]
     lock = threading.Lock()
+    first_batch = threading.Event()
+    release = threading.Event()
     jpeg = make_image(8, 8, "JPEG")
 
     def slow(*_):
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
-        time.sleep(0.05)
-        with lock:
-            active[0] -= 1
+            if active[0] == 4:
+                first_batch.set()
+        try:
+            assert release.wait(10), "the test did not release the image responses"
+        finally:
+            with lock:
+                active[0] -= 1
         return ok(jpeg, "image/jpeg")
 
     t, _ = make_transport(tmp_path, {("GET", "photos.fife.usercontent.google.com"): slow}, clock)
     t.image_pacer.sleep = lambda s: None  # spacing is covered by the pacer tests
-    threads = [
-        threading.Thread(target=t.fetch_image, args=(f"https://photos.fife.usercontent.google.com/pw/X{i}",))
-        for i in range(12)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = [pool.submit(t.fetch_image, f"https://photos.fife.usercontent.google.com/pw/X{i}") for i in range(12)]
+        try:
+            # Observe four active requests without relying on a scheduling gap.
+            assert first_batch.wait(10), "four image requests did not overlap"
+        finally:
+            release.set()
+        assert all(future.result(timeout=10) == jpeg for future in futures)
     assert peak[0] == 4
 
 

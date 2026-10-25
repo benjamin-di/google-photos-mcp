@@ -2,6 +2,7 @@
 cookies.txt
 *.cookies.txt
 !tests/fixtures/session/cookies.txt
+!tests/fixtures/identity_snapshot/cookies.txt
 .env
 
 # python

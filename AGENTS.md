@@ -39,3 +39,11 @@ addresses, hosts, networks, internal services or deployments, and must not carry
 from a photo library. Recorded fixtures go through the capture anonymiser and
 `tests/test_fixture_privacy.py`; samples use `example.com` addresses and `fake-` values.
 Describe behaviour, not where it runs.
+
+## Optional maintenance boundary
+
+`src/photos_maintenance` owns explicit Linux credential maintenance, independently of
+the human window and reader. Preserve positive signed-out evidence, attempt
+accounting, durable holds, account checks and snapshot compatibility. Generic
+mechanics belong in signin-window; runtime credentials and planner identities
+belong in deployment configuration. See [Account maintenance](docs/MAINTENANCE.md).

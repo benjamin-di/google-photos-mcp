@@ -646,3 +646,5 @@ used under the MIT licence with its author's permission;
 vendors a modified subset of [gpwc](https://github.com/xob0t/google_photos_web_client) and
 derives its parser fixtures from [Google-Photos-Toolkit](https://github.com/xob0t/Google-Photos-Toolkit),
 both MIT. See `NOTICE` and `THIRD_PARTY_NOTICES`.
+
+Optional operator-owned account upkeep is documented in [Account maintenance](docs/MAINTENANCE.md).
