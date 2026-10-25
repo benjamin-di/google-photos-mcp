@@ -1,6 +1,6 @@
 [project]
 name = "google-photos-mcp"
-version = "0.9.7"
+version = "0.10.0"
 description = "MCP server for Google Photos libraries (search, view, albums) over the web app's private RPCs"
 readme = "README.md"
 license = "MIT"
@@ -17,7 +17,7 @@ dependencies = [
     # PHOTOS_BUDGET_TZ on images without a system time zone database.
     "tzdata>=2025.2",
     # The sign-in windows' service, the sign-in links' relay and the paste add-on.
-    "signin-window>=0.2.0,<0.3",
+    "signin-window>=0.3.0,<0.4",
 ]
 
 [project.urls]

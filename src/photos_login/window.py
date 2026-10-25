@@ -8,8 +8,8 @@ and snapshot, so the window must not become a way to reach them, or anything but
 * Chromium is signin-window's locked-down browser (``signin_window.browser``): kiosk mode (no address bar, tabs or
   menus), its managed policy (installed by the image, checked before a window opens: no ``file://``, ``chrome://``,
   ``view-source:``, ``data:`` or DevTools pages, no file dialogs, downloads, printing or offers to save the password),
-  and in the sign-in window passkeys hidden from Google's pages (none can work there) and no tab or window from
-  Ctrl+T or Ctrl+N.
+  and in the sign-in window no tab or window from Ctrl+T or Ctrl+N. Google's pages see the browser as it is, passkeys
+  included: none can work there, so the person picks the password.
 * Top-level pages are limited to Google's sign-in hosts (``allowed_document``).
 * The live view is offered only while the profile is shown signed out on Google's sign-in page (state ``waiting``):
   a profile that is still signed in is checked, and later exported, with nobody watching.
@@ -172,7 +172,7 @@ def sign_in(
     with _playwright() as playwright:
         context = launch(playwright, profile, layout, env)
         try:
-            harden_sync(context)  # passkeys hidden; Ctrl+T and Ctrl+N open nothing
+            harden_sync(context)  # Ctrl+T and Ctrl+N open nothing
 
             def guard(route: Any) -> None:
                 request = route.request

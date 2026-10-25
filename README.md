@@ -128,6 +128,15 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 
 - The images and metadata the tools return go to your MCP client and, through it, to the
   model provider it uses.
+- `photos_download` (when `PHOTOS_PUBLIC_URL` is configured) makes JPEG copies for transfer
+  to another tool. Each URL is a credential for one download within 10 minutes. Give it
+  directly to the importing tool; opening it first consumes it. Copies default to 2048 px
+  (up to 4096), contain no original EXIF metadata, and are not originals. Videos are refused.
+  Outstanding copies are held in bounded memory (64 MiB); restarting revokes all links.
+  A reverse proxy must forward only GET/HEAD of `/downloads/<43-character base64url token>`,
+  without a query or Authorization header. WhatsApp clients with URL import can call
+  `send_file(recipient=..., source_url=<returned url>)`; a plain Google Photos item URL
+  opens a sign-in page and cannot substitute for a file download.
 - With [sign-in links](#signing-in-with-a-link), the login service keeps each person's browser
   profile, which stays signed in to their **whole Google account** (not only Photos), and
   their snapshot. Whoever runs the server can use both: tell people so before they connect.
@@ -169,6 +178,7 @@ argument, never pydantic's raw text.
 | `photos_show` | `items` ≤12 `{id, note}`, `title` | a gallery card for the person ([Photo cards](#photo-cards)); the same data as JSON for other clients |
 | `photos_contact_sheet` | `ids` ≤24 | legend `n → id, date` + one JPEG grid ≤1568 px, numbered tiles, video badge |
 | `photos_view` | `ids` ≤4, `max_px` 256–1568 (1024) | per id a label block (width/height of the returned JPEG) + a JPEG block (videos: poster frame) |
+| `photos_download` | `ids` ≤10, `max_px` 256–4096 (2048); requires `PHOTOS_PUBLIC_URL` | one-time JPEG copy links, expiry, dimensions and size; no originals or video downloads |
 | `photos_status` | – | account, generation, snapshot age, breaker, budgets left, cache, last error |
 | `photos_canary` | – | `{ok, code, checked_at, cached, snapshot_age_s, generation}` (monitoring) |
 | `photos_connect` | – | a one-time sign-in link for the caller's own account: `{url, expires_at, account_id, signed_in, next_step}` ([Signing in with a link](#signing-in-with-a-link)) |
@@ -186,8 +196,9 @@ item reached the library: `mobile`, `web`, `shared`, `partnerShared`, `drive`, `
 library (false) and archive (true), because live library records end before the flag;
 search and `photos_get` read it from the record; it is null where the record does not
 say (album items). Filenames come from a second RPC (EWgK9e); if it fails for any reason other than
-the session, the items go out with `filename: null`. Images are at most 1568 px; there is
-no original or download path. Listings carry `coverage` (`pagination_complete`,
+the session, the items go out with `filename: null`. Inline images are at most 1568 px;
+`photos_download` exports JPEG copies up to 4096 px for file transfer. Original files
+are not available. Listings carry `coverage` (`pagination_complete`,
 `shared_partner: "not_covered"`, `archive_included` — false only for
 `source=library` — and `cursor_recovered` / `dedupe_required` / `loop_detected` when they
 apply) and `freshness` (`generation`, `session_verified_at`, `served_at`).
@@ -493,8 +504,8 @@ sign in on Google's own page in their browser, phone or computer.
 - **The window.** The page shows Google's sign-in page, running in that account's profile on a
   virtual display, through [noVNC](https://github.com/novnc/noVNC) relayed by the server.
   Nothing on the sign-in is automated: the person does every step, Google's own checks
-  included. Passkeys do not work in a remote window (they are hidden there, so Google does not
-  offer them): sign in with the password and the code or prompt Google asks for.
+  included. Passkeys do not work in a remote window: if Google offers one, choose another way, and
+  sign in with the password and the code or prompt Google asks for.
 - **The window is locked down**, because the login service keeps every further account's
   profile and snapshot: Chromium runs in kiosk mode (no address bar, tabs or menus) under
   [signin-window](https://github.com/benjamin-di/signin-window)'s managed policy (installed by

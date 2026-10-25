@@ -50,6 +50,7 @@ from .cache import ThumbCache
 from .client import AGENT_INPUT_CODES, PhotosService
 from .config import ConfigError, Settings
 from .connect import ConnectFlow
+from .downloads import DownloadLinks
 from .errors import NEXT_STEP, PhotosError, invalid
 from .login_client import LoginClient, LoginUnavailable
 from .session import SessionReader
@@ -70,6 +71,8 @@ log = logging.getLogger("photos")
 T = TypeVar("T")
 
 READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+# Download copies read the library but issue a fresh single-use capability each time.
+DOWNLOAD = {**READ, "idempotentHint": False}
 LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 # photos_connect makes a link (state on this server), and changes nothing at Google.
 LINK = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
@@ -121,8 +124,8 @@ _ERRORS = "\n".join(f"- {code}: {text}" for code, text in NEXT_STEP.items())
 INSTRUCTIONS = f"""\
 Google Photos for the calling person's own account, through the same private web API
 photos.google.com uses: find and look at photos and videos, add photos and videos, move them to
-the trash and back, and organise albums. Nothing here empties the trash, archives, edits or shares
-photos.
+the trash and back, and organise albums. Nothing here empties the trash, archives or edits
+photos, or changes Google Photos sharing settings.
 
 Flow: photos_search -> photos_contact_sheet -> photos_view, then photos_show for the person.
 1. photos_search(query) uses Google's own search: people (a name the library has
@@ -171,8 +174,12 @@ photos_delete, photos_album_delete and photos_album_remove take things away: ask
 before calling them, showing exactly what goes (photos_show for photos, the album's title and
 count for an album); their client also asks them to approve each call.
 
-Images: at most 1568 px on the longest edge; originals and downloads are not available here
-(the person opens an item's url to download it).
+Images for viewing: at most 1568 px on the longest edge. When photos_download is offered,
+it makes one-time JPEG download links for transferring photos to another tool: for example,
+pass each returned url to WhatsApp send_file(source_url=..., recipient=...). Do not open or
+preview the link first: one GET consumes it. Links expire in 10 minutes. Copies default to
+2048 px (up to 4096), strip original metadata and are not original files. Videos are refused,
+never replaced by a poster. Original files (originals) are not available here.
 photos_view's width/height describe the returned JPEG, not the original (photos_get has
 the original's dimensions).
 
@@ -413,10 +420,13 @@ def create_server(
         mcp._additional_http_routes.append(Mount("/connect", app=flow.app()))  # as fastmcp.contrib does
     gate = Gate(UPLOAD_CONCURRENCY)  # uploads at once on this server, by links and photos_upload alike
     links: UploadLinks | None = None
+    downloads: DownloadLinks | None = None
     if settings is not None and settings.public_url:
         # Upload links (uploads.py): a page and a PUT address, outside the bearer like the sign-in links.
         links = UploadLinks(settings, registry.get, gate)
         mcp._additional_http_routes.append(Mount("/uploads", app=links.app()))
+        downloads = DownloadLinks(settings.public_url, registry.get)
+        mcp._additional_http_routes.append(Mount("/downloads", app=downloads.app()))
 
     async def call(fn: Callable[..., T], *args: Any) -> T:
         """Run ``fn`` (a PhotosService method) for the caller's own account."""
@@ -500,6 +510,20 @@ def create_server(
         plus uploaded_at (UTC), lat/lon, camera, width/height (original), size_bytes,
         duration_s and albums. Failed items carry their own error."""
         return await call(PhotosService.get, ids)
+
+    if downloads is not None:
+
+        @mcp.tool(annotations=DOWNLOAD)
+        async def photos_download(
+            ids: Annotated[list[str], Field(min_length=1, max_length=10, description="Photo ids (max 10)")],
+            max_px: Annotated[int, Field(ge=256, le=4096, description="JPEG longest edge in pixels")] = 2048,
+        ) -> dict[str, Any]:
+            """Make one-time download links for up to 10 photos, suitable for another tool's
+            file import (WhatsApp send_file: source_url). JPEG copies, at most max_px; not originals.
+            Returns items {id, url, filename, expires_at, mime_type, size_bytes, width, height, original:false}.
+            One GET per link, valid 10 minutes; HEAD does not consume it. Videos return an item error.
+            Pass links straight to the importing tool, without opening them first."""
+            return await call(lambda svc: downloads.create(svc, ids, max_px))
 
     @mcp.tool(annotations=READ)
     async def photos_contact_sheet(

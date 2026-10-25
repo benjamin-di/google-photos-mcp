@@ -467,7 +467,7 @@ def test_the_window_shows_only_googles_sign_in_pages():
         assert not window.allowed_document(url), url
 
 
-def test_the_window_is_a_kiosk_without_passkeys():
+def test_the_window_is_a_kiosk():
     import inspect
 
     assert "--kiosk" in window.LAUNCH_ARGS
