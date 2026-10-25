@@ -12,6 +12,7 @@ chmod -R a+rX "$deps"
 timeout 300 docker run --rm --init --network none --read-only --user 1000:1000 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs /tmp:rw,exec,mode=1777,size=1g \
+  --tmpfs /home/login:rw,uid=1000,gid=1000,mode=0700,size=64m \
   -v "$deps:/acceptance/deps:ro" -v "$PWD/tests:/acceptance/tests:ro" \
   -e PYTHONPATH=/acceptance/deps:/acceptance/tests -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   --entrypoint sh "$image" -c \

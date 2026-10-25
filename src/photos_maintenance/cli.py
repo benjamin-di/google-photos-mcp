@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -121,5 +122,15 @@ def main(argv=None):
     return code
 
 
-if __name__ == "__main__":
+def run():
+    """Unwind browser/profile contexts before a supervised worker stops."""
+
+    def terminate(_signum, _frame):
+        raise SystemExit(128 + signal.SIGTERM)
+
+    signal.signal(signal.SIGTERM, terminate)
     raise SystemExit(main())
+
+
+if __name__ == "__main__":
+    run()
