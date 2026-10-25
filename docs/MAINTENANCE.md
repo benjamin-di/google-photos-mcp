@@ -54,3 +54,20 @@ submits credentials.
 Run `make check` for policy, state, account and snapshot regressions. Release
 acceptance also exercises the human window against a synthetic site in the
 installed browser image. No CI check reaches a real account.
+
+## Shared maintenance contracts
+
+The existing state JSON, hold ids, cooldowns, generation watermarks and rolling
+attempt ledger remain compatible. Durable state operations now use
+signin-window's supported `MaintenanceStateStore`; this application still owns
+its reason enums, verification, snapshot schema and cooldown policy. No state
+reset, profile copy or budget refund accompanies this upgrade.
+
+The default credential reader remains 1Password. To use another store, set
+`PHOTOS_MAINTENANCE_CREDENTIAL_READER=example_backend:create_reader` to an
+explicit trusted factory implementing signin-window's `CredentialReader`.
+Configure an opaque reference with `PHOTOS_MAINTENANCE_CREDENTIAL_REFERENCE`.
+The backend's `available` property must not read secrets or contact a provider.
+Only the requested username, password or generated TOTP is resolved just in time.
+Origin checks, error redaction, durable budgets and holds apply to all backends.
+A selected reader's failure never falls back to the ambient 1Password identity.

@@ -98,3 +98,31 @@ def test_cli_adopts_existing_attempt_file_without_refund(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert datetime.fromisoformat(report["next_sign_in_at"]) > now + timedelta(hours=23)
     assert path.read_bytes() == before
+
+
+def test_custom_reader_needs_no_ambient_op_identity(tmp_path, monkeypatch):
+    from types import ModuleType
+
+    from signin_window.automation.secrets import load_credential_reader
+
+    from photos_maintenance.config import load_identity_target
+
+    class Reader:
+        available = True
+
+        def read_field(self, *args, **kwargs):
+            pytest.fail("readiness must not read credentials")
+
+    module = ModuleType("example_backend")
+    module.create = Reader
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv("PHOTOS_MAINTENANCE_CREDENTIAL_READER", "example_backend:create")
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    spec = load_identity_target("google", credential_reference="example:account")
+    assert spec.secret_ref == "example:account"
+    assert load_credential_reader("example_backend:create").available
+    keeper = cli.build_keeper(tmp_path, tmp_path / "export", "owner@example.com", "example:account")
+    missing = keeper._readiness().missing
+    assert not any(value.value in {"op_cli", "op_service_token", "credential_reader"} for value in missing)
+    monkeypatch.setenv("PHOTOS_MAINTENANCE_CREDENTIAL_READER", "absent_backend:create")
+    assert any(value.value == "credential_reader" for value in keeper._readiness().missing)

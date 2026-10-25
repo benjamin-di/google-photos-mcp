@@ -37,7 +37,7 @@ def _https_origin(url: str) -> str:
 
 class IdentityTargetSpec(FrozenModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
-    secret_ref: str = Field(default="", pattern=r"^(?:op://[^/\r\n{}]+/[^/\r\n{}]+)?$")
+    secret_ref: str = Field(default="", max_length=2048, pattern=r"^[^\r\n\x00{}]*$")
     login_url: str
     allowed_origins: frozenset[str] = Field(min_length=1)
     identity_hosts: tuple[str, ...] = Field(min_length=1)

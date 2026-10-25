@@ -6,6 +6,7 @@ policy (budget, holds, cooldowns, publication) lives in :mod:`.keeper`.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -21,7 +22,7 @@ from signin_window.automation.browser import BrowserSession as PatchrightMintCon
 from signin_window.automation.challenges import ChallengeMode, ChallengeVendor
 from signin_window.automation.google import GoogleIdentityDriver
 from signin_window.automation.resolver import ChallengeResolver
-from signin_window.automation.secret_filler import OpSecretFiller
+from signin_window.automation.secret_filler import configured_credential_filler
 
 from .config import IdentityTargetSpec
 from .outcomes import (
@@ -476,7 +477,8 @@ def open_google_browser(
                 expected_email=expected_email,
                 driver=GoogleIdentityDriver(
                     spec.identity_config(),
-                    secrets=secrets or OpSecretFiller(),
+                    secrets=secrets
+                    or configured_credential_filler(os.environ.get("PHOTOS_MAINTENANCE_CREDENTIAL_READER", "")),
                 ),
                 challenge_resolver=ChallengeResolver({}),
             )

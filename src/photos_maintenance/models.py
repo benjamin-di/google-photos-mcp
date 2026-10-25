@@ -14,6 +14,7 @@ class PersistenceError(OSError):
 
 
 class Requirement(StrEnum):
+    CREDENTIAL_READER = "credential_reader"
     CREDENTIAL_REFERENCE = "credential_reference"
     OP_CLI = "op_cli"
     OP_SERVICE_TOKEN = "op_service_token"

@@ -1,4 +1,5 @@
 """Install a verified pip wheel and preserve patched, offline venv creation."""
+import ensurepip
 import hashlib
 import pathlib
 import shutil
@@ -6,8 +7,6 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
-
-import ensurepip
 
 VERSION = "26.2.2"
 SHA256 = "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
