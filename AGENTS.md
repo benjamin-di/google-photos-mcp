@@ -12,6 +12,8 @@ commands are tested through their pure parts. `tests/test_safety.py` is the boun
 photos-mcp may do to a library (reads, and album changes, uploads and the trash through `GoogleTransport.write`
 and `upload_bytes` only, never emptying the trash; the one non-Google request is the guarded link fetch in `fetch.py`):
 a new RPC id, host or payload builder is a deliberate change there, never a side effect.
+`connections_auth.py` owns the separate OIDC control plane through Authlib and a fixed
+configured issuer; it never adds identity-provider calls to the Google data transport.
 
 The session snapshot format (README "Session snapshot", `src/photos_mcp/session.py`,
 `tests/fixtures/session/`) is an interface other tools write: keep it backward compatible

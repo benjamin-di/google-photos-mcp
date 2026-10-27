@@ -8,7 +8,7 @@ a path-stripping reverse proxy. Then, as the person:
    continues, waits for the live view, puts text on the clipboard, presses Ctrl+V and checks the text arrived in the
    remote field, typed (clipboard *reading* is not granted to the page, so it can only have come from the browser's
    own paste event); the window's browser (launched as the real window launches it, under the managed policy) must
-   refuse local files, its own pages and DevTools; closing the page must close the window;
+   refuse local files, its own pages and DevTools; Cancel must close the window;
 2. asks for a second link and continues: the stand-in "signs in" at once and writes a snapshot, the page must say
    connected, and the account must be bound to that address and serve its session.
 
@@ -31,6 +31,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ from photos_login.windows import SignIn
 from photos_mcp import accounts, session_export
 from photos_mcp.auth import bearer_auth_from_env
 from photos_mcp.config import Settings
+from photos_mcp.connections_auth import ConnectionsConfig
 from photos_mcp.server import HTTP_OPTIONS, Accounts, create_server
 from photos_mcp.session import parse_cookies_txt
 
@@ -77,9 +79,12 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+SERVERS = []
+
+
 async def serve(app, port: int) -> uvicorn.Server:  # type: ignore[no-untyped-def]
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on"))
-    asyncio.get_running_loop().create_task(server.serve())
+    SERVERS.append((server, asyncio.create_task(server.serve())))
     for _ in range(100):
         if server.started:
             return server
@@ -159,9 +164,12 @@ class StandIn:
         raise window.Cancelled()
 
 
-async def main() -> int:
+async def exercise() -> int:
     root = Path(tempfile.mkdtemp(prefix="photos-e2e-"))
-    login_port, mcp_port = free_port(), free_port()
+    ports = set()
+    while len(ports) < 3:
+        ports.add(free_port())
+    login_port, mcp_port, unused_default_port = ports
     paths = Paths(profiles=root / "profiles", sessions=root / "sessions")
     managed = os.environ.get("PHOTOS_E2E_UNMANAGED") != "1"
     if managed and not window.policy_installed():
@@ -190,6 +198,9 @@ async def main() -> int:
             "PHOTOS_STATE_DIR": str(root / "state"),
             "PHOTOS_ACCOUNT_SESSIONS_DIR": str(paths.sessions),
             "PHOTOS_LOGIN_URL": f"http://127.0.0.1:{login_port}",
+            # This fixture provisions only the linked e2e account. The native
+            # default custodian has its full owner/browser acceptance separately.
+            "PHOTOS_DEFAULT_LOGIN_URL": f"http://127.0.0.1:{unused_default_port}",
             "PHOTOS_LOGIN_TOKEN": LOGIN_TOKEN,
             "PHOTOS_PUBLIC_URL": base,
             "PHOTOS_TRUSTED_ACCOUNT_HEADER": HEADER,
@@ -197,7 +208,28 @@ async def main() -> int:
     )
     accounts.add(settings, "e2e", rpc_budget=100, thumb_budget=100)
     auth = bearer_auth_from_env({"MCP_BEARER_TOKEN": BEARER})
-    inner = create_server(Accounts.from_settings(settings), auth=auth).http_app(**HTTP_OPTIONS)
+    config = ConnectionsConfig(
+        "https://identity.example.com",
+        "photos-ui",
+        base,
+        {"example-subject": "e2e"},
+        "photos-users",
+        settings.state_dir,
+        True,
+    )
+    mcp = create_server(Accounts.from_settings(settings), auth=auth, connections=config)
+    sid = "s" * 43
+    mcp.connections_ui.auth.store.save(
+        sid,
+        {
+            "issuer": config.issuer,
+            "sub": "example-subject",
+            "groups": [config.required_group],
+            "claims": {},
+            "expires": time.time() + 900,
+        },
+    )
+    inner = mcp.http_app(**HTTP_OPTIONS)
 
     @contextlib.asynccontextmanager
     async def lifespan(_):  # type: ignore[no-untyped-def]
@@ -207,15 +239,19 @@ async def main() -> int:
     await serve(Starlette(routes=[Mount("/photos", app=inner)], lifespan=lifespan), mcp_port)
 
     link = await asyncio.to_thread(mcp_call, f"{base}/mcp", "photos_connect")
-    assert link["account_id"] == "e2e" and link["url"].startswith(f"{base}/connect/"), link
+    assert link["account_id"] == "e2e" and link["url"] == f"{base}/connections/", link
     print("link made for the caller's account")
 
     async with async_playwright() as pw:
         viewer = await pw.chromium.launch(headless=True)
         context = await viewer.new_context(viewport={"width": 1280, "height": 800})
         await context.grant_permissions(["clipboard-write"], origin=f"http://127.0.0.1:{mcp_port}")
+        await context.add_cookies(
+            [{"name": mcp.connections_ui.auth.cookie, "value": sid, "url": f"http://127.0.0.1:{mcp_port}"}]
+        )
         page = await context.new_page()
         await page.goto(link["url"])
+        await page.get_by_role("button", name="Connect", exact=True).click()
         await page.click("#go")  # the page names the account and waits for the person to continue
         frame_element = await page.wait_for_selector("iframe", timeout=60_000)
         frame = await frame_element.content_frame()
@@ -249,24 +285,26 @@ async def main() -> int:
                 return 1
             print("the window's browser refuses local files and its own pages (managed policy)")
 
-        await page.close(run_before_unload=True)  # pagehide sends the cancel
+        await page.get_by_role("button", name="Cancel", exact=True).click()
+        await page.close()  # closing/reloading alone now preserves an authenticated attempt
         for _ in range(300):  # closing ends Chromium, x11vnc and Xvfb, which can take a few seconds
             if not lock.locked() and all(login.ended_at for login in windows._windows.values()):
                 break
             await asyncio.sleep(0.1)
         else:
-            print("FAIL: closing the page did not close the sign-in window", file=sys.stderr)
+            print("FAIL: Cancel did not close the sign-in window", file=sys.stderr)
             # Which part did not happen: the cancel never arrived (cancel unset), or the window was slow to end.
             for login in windows._windows.values():
                 print(f"  window {login.id[:6]}: state={login.state} cancel={login.cancelled.is_set()} "
                       f"ended={login.ended_at is not None} error={login.error}", file=sys.stderr)  # fmt: skip
             print(f"  lock held: {lock.locked()}", file=sys.stderr)
             return 1
-        print("closing the page closed the sign-in window")
+        print("Cancel closed the sign-in window")
 
         link = await asyncio.to_thread(mcp_call, f"{base}/mcp", "photos_connect")
         page = await context.new_page()
         await page.goto(link["url"])
+        await page.get_by_role("button", name="Connect", exact=True).click()
         await page.click("#go")
         await page.wait_for_selector("text=Connected", timeout=60_000)
         shown = await page.inner_text("#done")
@@ -286,6 +324,15 @@ async def main() -> int:
     print("the account serves its new session")
     print("login e2e: ok")
     return 0
+
+
+async def main() -> int:
+    try:
+        return await exercise()
+    finally:
+        for server, task in reversed(SERVERS):
+            server.should_exit = True
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
 
 if __name__ == "__main__":

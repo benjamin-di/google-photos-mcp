@@ -72,6 +72,7 @@ RUN uv pip install --system --compile-bytecode --no-deps . \
 RUN python -c "from pathlib import Path; import patchright; p = Path(patchright.__file__).parent / 'driver' / 'node'; p.unlink(); p.symlink_to('/usr/local/bin/browser-node')" \
  && python -m patchright --version
 
+ARG VERSION=unknown
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG SOURCE_URL=unknown
@@ -80,6 +81,7 @@ LABEL org.opencontainers.image.title="photos-mcp-login" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
 # /profiles: each account's browser profile (its Google sign-in). /sessions: the snapshots photos-mcp reads.

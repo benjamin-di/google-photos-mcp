@@ -9,7 +9,7 @@ directory because an identity target is not a provider.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -61,6 +61,28 @@ class TargetStateStore(MaintenanceStateStore):
             label="identity target state",
             lock_timeout_seconds=lock_timeout_seconds,
         )
+
+    def record_manual_publish(self, target, generation, hold_id, *, verified_at):
+        """Record independent human proof without resetting cooldowns or attempts."""
+        with self._locked(target):
+            state = self._load(target)
+            if generation < state.last_generation:
+                raise PersistenceError("manual generation must not decrease")
+            hold = state.hold
+            if hold is not None and hold.hold_id == hold_id:
+                hold = None
+            self._write(
+                target,
+                state.model_copy(
+                    update={
+                        "hold": hold,
+                        "last_generation": generation,
+                        "last_published_at": datetime.fromtimestamp(verified_at, UTC)
+                        if generation > state.last_generation
+                        else state.last_published_at,
+                    }
+                ),
+            )
 
 
 __all__ = ["BLOCK_COOLDOWNS", "TargetCooldown", "TargetHold", "TargetState", "TargetStateStore"]

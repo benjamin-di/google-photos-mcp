@@ -5,8 +5,8 @@ that works for a short time and one successful sign-in. The page shows Google's 
 account's browser profile in the login service (``photos_login``) and viewed through noVNC, both relayed by this
 server (signin-window's relay). Once the person is signed in, the login service writes the account's snapshot itself
 (and keeps it fresh); this server only binds the account to the Google address the sign-in proved (``_bind``).
-Nothing here shows, returns or reads a session, and nothing here is behind the server's bearer: the id is the
-credential.
+Nothing here shows, returns or reads a session. Photos mounts these routes behind its browser-owner
+policy; the attempt id alone grants no access.
 
   GET  /connect/{id}               the page
   POST /connect/{id}/start         open a sign-in window (the layout follows the person's screen)
@@ -23,7 +23,7 @@ import time
 from typing import Any
 
 from signin_window.page import PageText
-from signin_window.relay import Link, LinkLimited, Relay
+from signin_window.relay import AttemptContext, Link, LinkLimited, Relay
 from starlette.applications import Starlette
 
 from . import accounts
@@ -76,19 +76,33 @@ TEXT = PageText(
 
 
 class ConnectFlow:
-    def __init__(self, settings: Settings, client: LoginClient, *, clock=time.time) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: LoginClient,
+        *,
+        clock=time.time,
+        authorize=None,
+        revision=None,
+        text=None,
+        public_url=None,
+    ) -> None:
         assert settings.public_url
         self.settings, self.client = settings, client
+        self.revision = revision or (lambda account: str(account.created_at))
         # The relay runs one hook at a time: the binding checks and the write go together.
-        self.relay = Relay(client, settings.public_url.rstrip("/") + "/connect", text=TEXT, clock=clock,
+        self.relay = Relay(client, (public_url or settings.public_url).rstrip("/") + "/connect", text=text or TEXT,
+                           clock=clock, authorize=authorize,
                            before_start=self._before_start, on_ended=self._ended)  # fmt: skip
 
     def create(self, account: accounts.Account | None, *, signed_in: bool) -> dict[str, Any]:
         """A sign-in link for ``account`` (the caller's): replaces any open link of that account."""
-        if account is None or not account.linked:
-            raise PhotosError("connect_unavailable", log_detail="the default account signs in through the operator")
+        if account is None:
+            raise PhotosError("connect_unavailable", log_detail="account missing")
         try:
-            link = self.relay.create(account.id)
+            link = self.relay.create(
+                account.id, context=AttemptContext(owner=account.id, target=self.revision(account))
+            )
         except LinkLimited:
             raise PhotosError("connect_limited", log_detail="link rate") from None
         log.info("connect: a sign-in link for account %s", account.id)
@@ -98,7 +112,9 @@ class ConnectFlow:
             "account_id": account.id,
             "signed_in": signed_in,
             "next_step": (
-                "Give the person this link and nothing else; it is for them only. It opens Google's own sign-in page "
+                "Give the person this link and nothing else; they sign in with their own identity "
+                "before connecting Google Photos. "
+                "It opens Google's own sign-in page "
                 f"and works once, for {self.relay.link_ttl // 60} minutes; a newer link replaces it. After they say "
                 "they are done, photos_status shows the session state ok."
             ),
@@ -110,18 +126,33 @@ class ConnectFlow:
             account = accounts.load(self.settings, link.key)
         except PhotosError:
             return "failed"  # the account was removed meanwhile
+        if link.context and link.context.target != self.revision(account):
+            return "failed"
         link.params.update(account=account.id, email=account.email,
                            taken=accounts.taken_emails(self.settings, account.id))  # fmt: skip
+        if account.id == self.settings.default_account and link.context:
+            link.params["epoch"] = link.context.target.split(":", 1)[1]
         return None
 
     def _ended(self, link: Link, window: dict[str, Any]) -> str:
+        try:
+            account = accounts.load(self.settings, link.key)
+            if link.context and link.context.target != self.revision(account):
+                return "failed"
+        except PhotosError:
+            return "failed"
         state = str(window.get("state") or "")
         if state != "connected":
             return state if state in TEXT.outcomes else "failed"
         return self._bind(link, str(window.get("email") or ""))
 
     def _bind(self, link: Link, email: str) -> str:
-        if not accounts.bind_email(self.settings, link.key, email):
+        bound = (
+            email.strip().lower() == self.settings.expected_email
+            if link.key == self.settings.default_account
+            else accounts.bind_email(self.settings, link.key, email)
+        )
+        if not bound:
             # The login service checked the same rules before it wrote the snapshot; this is a race with another
             # account binding the same address. That snapshot must not stay: the account starts over.
             log.warning("connect: account %s could not be bound to the address it signed in as", link.key)

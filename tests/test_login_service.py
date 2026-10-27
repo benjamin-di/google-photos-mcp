@@ -132,9 +132,11 @@ def test_a_refused_sign_in_wipes_the_profile(paths, code):
     assert not paths.profile("second").exists() and paths.keeper("second") is None
 
 
-def test_a_refused_sign_in_of_a_kept_account_withdraws_its_snapshot(paths):
+def test_a_refused_replacement_preserves_the_accepted_snapshot_and_marks_check_needed(paths):
     snapshot(paths, "second", 4)
     paths.record("second", SIGNED_IN, email=EMAIL, generation=4)
+    previous_meta = (paths.session("second") / "meta.json").read_bytes()
+    previous_cookies = (paths.session("second") / "cookies.txt").read_bytes()
     script = Script(paths)
     script.outcome = window.Refused("wrong_account")
     _, client = service(paths, script)
@@ -142,8 +144,10 @@ def test_a_refused_sign_in_of_a_kept_account_withdraws_its_snapshot(paths):
         login_id = start(client, email=EMAIL)
         script.go.set()
         assert state(client, login_id, ENDED)["state"] == "wrong_account"
-    assert not (paths.session("second") / "meta.json").exists()
-    assert paths.keeper("second")["state"] == SIGNED_OUT and paths.generation("second") == 4
+    assert (paths.session("second") / "meta.json").read_bytes() == previous_meta
+    assert (paths.session("second") / "cookies.txt").read_bytes() == previous_cookies
+    assert not paths.profile("second").exists()
+    assert paths.keeper("second")["state"] == ERROR and paths.generation("second") == 4
 
 
 def test_a_cancelled_window_leaves_no_profile_of_an_unkept_account(paths):

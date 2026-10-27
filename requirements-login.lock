@@ -28,7 +28,9 @@ attrs==26.1.0 \
 authlib==1.8.0 \
     --hash=sha256:88aebbd9af6757e14e912d5dc007ae1dc1f3e27e3b2152ce7c552ee2c3b3c121 \
     --hash=sha256:f3ecd5f1da737262fb53bf1a4d95c4ea1ad9dd509316587a255c99ab1838a4f0
-    # via fastmcp-slim
+    # via
+    #   fastmcp-slim
+    #   signin-window
 beartype==0.23.1 \
     --hash=sha256:4461b4dc57e3fdd6c8a8464b22cf118002eea107c33e9fef651c69068ab3cce3 \
     --hash=sha256:8b805f246b32931c74f2b321ea0939fe5bb2ff43c12a3eff19cc4c854b832e1d
@@ -351,7 +353,9 @@ httpx2==2.13.1 \
     --hash=sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa
     # via
     #   fastmcp-slim
+    #   google-photos-mcp
     #   mcp
+    #   signin-window
 httpx2-jsfetch==1.0 ; sys_platform == 'emscripten' \
     --hash=sha256:70a0e3eabfef7cce5ad9c629f7d01ca05e418f586646f4ddf14782e4c1454c60 \
     --hash=sha256:cb916b707601e69a07721aabc8f3f6659be3a6893bc1ff5c6f9e02241df2da32
@@ -872,9 +876,9 @@ secretstorage==3.5.0 ; sys_platform == 'linux' \
     --hash=sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137 \
     --hash=sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be
     # via keyring
-signin-window==0.4.4 \
-    --hash=sha256:3a33210007eafbd8accacc55b6f75b43e06f6909fe40bc282ef6dcd054322b59 \
-    --hash=sha256:9d77a2edaeb72ffb47b5921c942c74f9269b0c48097b905ced6bc3dea3d3faa9
+signin-window==0.4.7 \
+    --hash=sha256:0006cb51598435bdf61c03b72fad997b1b983b451b0f24624af11ac8124973d5 \
+    --hash=sha256:4af4da647b631f41b816d703042b86e7c7d388a72a96a2e2fda8aefda3f28544
     # via google-photos-mcp
 sse-starlette==3.5.0 \
     --hash=sha256:3e6e1070df3f0f5d9cea81496de92dbb72f6721871d99748ece67441dd8b7997 \

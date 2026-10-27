@@ -1491,3 +1491,41 @@ def test_a_publish_time_in_the_future_is_stale(tmp_path: Path, offset: timedelta
     assert result.outcome is IdentityOutcome.COOLDOWN_ACTIVE
     assert result.snapshot_age_s == age
     assert result.needs_attention is stale
+
+
+def test_owner_disconnect_stops_maintenance_without_opening_browser_or_spending_budget(tmp_path):
+    from photos_mcp.connection_controls import PublicationGuard
+    from photos_mcp.connections_auth import BrowserStore
+
+    harness = Harness(tmp_path)
+    controls = BrowserStore(tmp_path / "connections")
+    controls.set_control("first", 1)
+    harness.keeper._connection_guard = PublicationGuard(controls, "first")
+    result = harness.run()
+    assert result.outcome is IdentityOutcome.DISCONNECTED
+    assert result.public_dict()["maintenance_suspended"] is True
+    assert not result.needs_attention and result.generation is None
+    assert harness.opened == 0 and harness.budget.attempts_today("google") == 0
+
+
+def test_disconnect_and_resume_during_verification_cannot_publish_an_old_attempt(tmp_path):
+    from photos_mcp.connection_controls import PublicationGuard
+    from photos_mcp.connections_auth import BrowserStore
+
+    harness = Harness(tmp_path)
+    controls = BrowserStore(tmp_path / "connections")
+    harness.keeper._connection_guard = PublicationGuard(controls, "first")
+    assert harness.run().outcome is IdentityOutcome.PUBLISHED
+    accepted = (harness.export / META_FILE).read_bytes()
+    warm = harness.browser.warm
+
+    def changed_generation():
+        controls.set_control("first", 1)
+        controls.set_control("first", 0)
+        return warm()
+
+    harness.browser.warm = changed_generation
+    result = harness.run()
+    assert result.outcome is IdentityOutcome.DISCONNECTED
+    assert (harness.export / META_FILE).read_bytes() == accepted
+    assert harness.state.load("google").last_generation == 1

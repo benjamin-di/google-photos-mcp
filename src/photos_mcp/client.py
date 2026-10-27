@@ -962,10 +962,9 @@ class PhotosService:
         }
         if self.account is not None:
             out["account_id"] = self.account.id
-            # Whether photos_connect makes sign-in links for this account (the default account's session is the
-            # operator's to keep).
-            out["sign_in_links"] = self.sign_in_links and linked
-            if linked:
+            # The same owner entry point covers native-default and further-account profiles.
+            out["sign_in_links"] = self.sign_in_links
+            if self.sign_in_links:
                 out["keeper"] = accounts.keeper_status(self.account)
         return out
 

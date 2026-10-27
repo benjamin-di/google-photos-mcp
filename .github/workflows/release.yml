@@ -81,9 +81,12 @@ jobs:
           candidate="$IMAGE:sha-$(git rev-parse --short=12 HEAD)"
           docker buildx build --platform "$PLATFORMS" -f Dockerfile --push -t "$candidate" \
             --build-arg PHOTOS_MCP_DEPS_IMAGE="$deps" \
+            --build-arg VERSION="$version" \
             --build-arg VCS_REF="$GITHUB_SHA" \
             --build-arg BUILD_DATE="$(git show -s --format=%cI HEAD)" \
             --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" .
+          candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er .digest)"
+          bash scripts/check-image-labels.sh "$IMAGE@$candidate_digest" "https://github.com/$GITHUB_REPOSITORY" "$GITHUB_SHA" "$version"
           # Smoke: HTTP refuses to start without a bearer; stdio answers initialize.
           rc=0
           docker run --rm --network none -e GOOGLE_PHOTOS_EXPECTED_EMAIL=smoke@example.com "$candidate" || rc=$?
@@ -119,9 +122,12 @@ jobs:
           version="${VERSION#v}"
           candidate="$IMAGE:sha-$(git rev-parse --short=12 HEAD)"
           docker buildx build --platform linux/amd64 -f Dockerfile.login --push -t "$candidate" \
+            --build-arg VERSION="$version" \
             --build-arg VCS_REF="$GITHUB_SHA" \
             --build-arg BUILD_DATE="$(git show -s --format=%cI HEAD)" \
             --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" .
+          candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er .digest)"
+          bash scripts/check-image-labels.sh "$IMAGE@$candidate_digest" "https://github.com/$GITHUB_REPOSITORY" "$GITHUB_SHA" "$version"
           docker pull -q "$candidate" >/dev/null
           # Smoke: everything the windows need is there, it refuses to start without its bearer, never as root.
           docker run --rm --network none --entrypoint sh "$candidate" -c '

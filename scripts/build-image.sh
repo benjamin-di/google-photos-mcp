@@ -21,6 +21,7 @@ fi
 grep -Eqi 'manifest unknown|not found' "$lookup_error" || { cat "$lookup_error" >&2; exit 1; }
 docker buildx build --provenance=false --output "${ZSTD_PUSH:?}" -f "$dockerfile" \
     --platform "${PLATFORMS:-linux/amd64}" \
+    --build-arg VERSION="${VERSION:?application version required}" \
     --build-arg VCS_REF="$vcs_ref" \
     ${SOURCE_URL:+--build-arg "SOURCE_URL=$SOURCE_URL"} \
     --build-arg BUILD_DATE="$build_date" \

@@ -115,3 +115,99 @@ def test_download_tool_is_conditional_and_returns_transfer_url(service, photo, t
     import json
 
     assert json.loads(result.content[0].text)["items"][0]["url"].startswith("https://example.com/photos/downloads/")
+
+
+def test_old_download_does_not_revive_after_disconnect_and_resume(service, photo, clock, tmp_path):
+    from photos_mcp.connection_controls import ConnectionAdmission
+    from photos_mcp.connections_auth import BrowserStore
+
+    service.account = SimpleNamespace(id="first", created_at=100, email="first@example.com")
+    store = BrowserStore(tmp_path / "connections")
+    admission = ConnectionAdmission(store)
+    links = DownloadLinks(
+        "https://example.com/photos",
+        lambda _: service,
+        clock=clock,
+        revision_for=store.control,
+        guard_for=admission.operation,
+    )
+    path = link_path(links.create(service, [photo], 256))
+    with TestClient(links.app()) as client:
+        assert client.head(path).status_code == 200
+        store.set_control("first", 1)
+        assert client.head(path).status_code == 404
+        store.set_control("first", 0)
+        assert client.head(path).status_code == 404
+        fresh = link_path(links.create(service, [photo], 256))
+        assert client.get(fresh).status_code == 200
+
+
+def test_disconnect_drains_actual_download_body_and_rechecks_before_headers(service, photo, clock, tmp_path):
+    import asyncio
+
+    from starlette.requests import Request
+
+    from photos_mcp.connection_controls import ConnectionAdmission
+    from photos_mcp.connections_auth import BrowserStore
+
+    service.account = SimpleNamespace(id="first", created_at=100, email="first@example.com")
+    store = BrowserStore(tmp_path / "connections")
+    admission = ConnectionAdmission(store)
+    links = DownloadLinks(
+        "https://example.com/photos",
+        lambda _: service,
+        clock=clock,
+        revision_for=store.control,
+        guard_for=admission.operation,
+    )
+    path = link_path(links.create(service, [photo], 256))
+    token = path.strip("/")
+    scope = {
+        "type": "http",
+        "method": "HEAD",
+        "path": path,
+        "headers": [],
+        "query_string": b"",
+        "path_params": {"token": token},
+    }
+
+    async def scenario():
+        body, release = asyncio.Event(), asyncio.Event()
+        messages = []
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def paused_send(message):
+            if message["type"] == "http.response.body":
+                body.set()
+                await release.wait()
+            messages.append(message)
+
+        response = await links.download(Request(scope))
+        sending = asyncio.create_task(response(scope, receive, paused_send))
+        await asyncio.wait_for(body.wait(), 5)
+        try:
+            store.set_control("first", 2)
+            with pytest.raises(TimeoutError):
+                await asyncio.to_thread(admission.drain, "first", timeout=0.02)
+        finally:
+            release.set()
+            await sending
+        admission.drain("first")
+        assert messages[0]["status"] == 200
+        store.set_control("first", 0)
+        path2 = link_path(links.create(service, [photo], 256))
+        scope["path_params"]["token"] = path2.strip("/")
+        pending = await links.download(Request(scope))
+        store.set_control("first", 1)
+        denied = []
+
+        async def send(message):
+            denied.append(message)
+
+        await pending(scope, receive, send)
+        assert denied[0]["status"] == 404
+        assert denied[-1]["body"] == b""
+
+    asyncio.run(scenario())

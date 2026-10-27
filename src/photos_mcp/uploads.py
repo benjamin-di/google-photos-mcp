@@ -83,6 +83,7 @@ class Link:
     created: float
     files: int = 0
     busy: bool = False
+    revision: tuple[str, int] | None = None
 
 
 def _iso(ts: float) -> str:
@@ -105,12 +106,16 @@ class UploadLinks:
         gate: Gate,
         *,
         clock=time.time,
+        run_for=None,
+        revision_for=None,
     ) -> None:
         assert settings.public_url
         self.public_url = settings.public_url.rstrip("/")
         self.max_bytes = settings.upload_max_bytes
         self.directory = settings.upload_dir
         self._service_for = service_for
+        self._revision_for = revision_for or (lambda account: None)
+        self._run_for = run_for or (lambda account, operation: operation(service_for(account)))
         self._clock = clock
         self._links: dict[str, Link] = {}
         self._made: dict[str | None, collections.deque] = {}
@@ -143,6 +148,7 @@ class UploadLinks:
                 album["title"] if album else None,
                 accounts.mask_email(svc.account.email if svc.account is not None else None),
                 now,
+                revision=self._revision_for(account),
             )
             self._links[link.id] = link
         log.info("uploads: a link for account %s", account or "-")
@@ -176,7 +182,11 @@ class UploadLinks:
         with self._lock:
             self._expire(now)
             link = self._links.get(link_id) if LINK_ID.match(link_id or "") else None
-            if link is not None and now - link.created <= LINK_TTL:
+            if (
+                link is not None
+                and now - link.created <= LINK_TTL
+                and self._revision_for(link.account) == link.revision
+            ):
                 return link
             allowed = self._misses.allowed(address, now)
             self._misses.record(address, now)
@@ -226,14 +236,20 @@ class UploadLinks:
             if not slot:
                 raise PhotosError("busy", log_detail="no upload slot")
             svc = await anyio.to_thread.run_sync(self._service_for, link.account)
-            if _identity(svc) != link.identity:
+            if _identity(svc) != link.identity or self._revision_for(link.account) != link.revision:
                 raise PhotosError("account_not_connected", log_detail="the link's account was replaced")
             with Staging(self.directory, self.max_bytes) as staging:
                 await self._read(request, staging, length)
                 now = self._clock()
                 name = unquote(request.headers.get("x-file-name") or "")[:NAME_MAX] or None
                 staged = staging.finish(name, modified_ms(request.headers.get("x-file-modified"), now), now)
-                result = await anyio.to_thread.run_sync(lambda: svc.upload(staged, link.album, check_album=False))
+
+                def publish(current):
+                    if _identity(current) != link.identity or self._revision_for(link.account) != link.revision:
+                        raise PhotosError("account_not_connected", log_detail="the link's account was replaced")
+                    return current.upload(staged, link.album, check_album=False)
+
+                result = await anyio.to_thread.run_sync(lambda: self._run_for(link.account, publish))
             added = True
         except (ClientDisconnect, TimeoutError):
             return JSONResponse({"error": {"code": "invalid_argument"}}, status_code=400, headers=HEADERS)

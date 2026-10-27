@@ -21,10 +21,10 @@ from typing import Any
 
 from signin_window.service import Window
 
-from photos_mcp.session_export import ExportError, unpublish
+from photos_mcp.session_export import ExportError
 
 from . import window
-from .profiles import ERROR, SIGNED_IN, SIGNED_OUT, Paths
+from .profiles import ERROR, SIGNED_IN, Paths
 
 log = logging.getLogger("photos-login")
 
@@ -42,7 +42,8 @@ class SignIn:
     def __call__(self, login: Window) -> None:
         account = str(login.params["account"])
         login.report(account=account)
-        kept_before = (self.paths.keeper(account) or {}).get("state") in (SIGNED_IN, ERROR)
+        previous = self.paths.keeper(account) or {}
+        kept_before = previous.get("state") in (SIGNED_IN, ERROR)
 
         def on_state(state: str, host: str) -> None:
             if host:
@@ -71,13 +72,10 @@ class SignIn:
             login.report(email=email)
             login.finish("connected")
         except window.Refused as refused:
-            # The profile now holds a Google account this account may not use: it goes, all of it. (Its own account
-            # was not signed in there any more, or the window would have found it at once: a kept snapshot of it is
-            # withdrawn too, so photos-mcp says not_signed_in.)
+            # Discard the refused browser identity, while preserving the last accepted snapshot for verification.
             self.paths.wipe_profile(account)
             if kept_before:
-                unpublish(self.paths.session(account))
-                self.paths.record(account, SIGNED_OUT, error=refused.code)
+                self.paths.record(account, ERROR, email=previous.get("email"), error=refused.code)
             login.finish(refused.code)
         except window.NotViewable as exc:
             self._tidy(account, kept_before)

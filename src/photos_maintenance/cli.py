@@ -83,7 +83,22 @@ def build_keeper(root: Path, export_dir: Path, expected_email: str, reference: s
         open_browser=lambda: open_google_browser(spec, profile=profile, expected_email=expected_email),
         lease=lambda: lease(root),
         utc_now=lambda: datetime.now(UTC),
+        connection_guard=connection_guard(),
     )
+
+
+def connection_guard():
+    folder = os.environ.get("PHOTOS_CONNECTIONS_CONTROLS_DIR")
+    if not folder:
+        return None
+    from photos_mcp.connection_controls import PublicationGuard
+    from photos_mcp.connections_auth import BrowserStore
+
+    root = Path(folder)
+    account = os.environ.get("PHOTOS_CONNECTIONS_ACCOUNT")
+    if not account or not (root / "browser.sqlite3").is_file():
+        raise ValueError("Configure existing connection controls and the maintained account")
+    return PublicationGuard(BrowserStore(root, track_location=False), account)
 
 
 def main(argv=None):
@@ -114,6 +129,14 @@ def main(argv=None):
             if not args.hold_id:
                 raise ValueError("an exact hold id is required")
             with lease(args.root):
+                from .human_state import NativePromotion
+
+                guard = connection_guard()
+                journal = args.root / "human-recovery" / "commit.json"
+                if guard is not None or journal.exists():
+                    if args.export_dir is None:
+                        raise ValueError("configure the existing export directory before recovering native state")
+                    NativePromotion(args.root, Path(args.export_dir), guard).recover()
                 cleared = state.clear_hold(TARGET, args.hold_id)
             payload = {"target": TARGET, "hold_id": args.hold_id, "cleared": cleared}
             code = 0 if cleared else 1

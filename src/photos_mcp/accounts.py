@@ -18,6 +18,7 @@ replaces it.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -26,6 +27,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from signin_window.state import exclusive_lock
 
 from .config import ACCOUNT_ID, Settings
 from .errors import PhotosError
@@ -48,7 +51,7 @@ class Account:
     thumb_budget: int
     state_dir: Path
     session_dir: Path
-    linked: bool  # signs in through links (the further accounts); the default account's snapshot is the operator's
+    linked: bool  # further-account storage/binding; the default retains its existing native layout
     created_at: int = 0  # tells a re-added account from the removed one of the same name
 
 
@@ -181,7 +184,7 @@ def load(settings: Settings, account_id: str) -> Account:
 
 def taken_emails(settings: Settings, except_id: str) -> list[str]:
     """The Google addresses other accounts here serve: a sign-in for ``except_id`` must not take one of them."""
-    out = {settings.expected_email}
+    out = {settings.expected_email} if except_id != settings.default_account else set()
     for account_id in configured(settings):
         if account_id != except_id and (data := _record(settings, account_id)) and (email := _email(data.get("email"))):
             out.add(email)
@@ -201,6 +204,18 @@ def _check_shares(settings: Settings, account_id: str, rpc: int, thumb: int) -> 
         )
 
 
+def _serialized_update(operation):
+    """Account uniqueness and budget shares must be checked and written together."""
+
+    @functools.wraps(operation)
+    def update(settings, *args, **kwargs):
+        with exclusive_lock(settings.state_dir / "accounts.lock", timeout_seconds=30):
+            return operation(settings, *args, **kwargs)
+
+    return update
+
+
+@_serialized_update
 def add(settings: Settings, account_id: str, *, rpc_budget: int, thumb_budget: int, email: str | None = None) -> Path:
     """Create a further account with its budget shares (taken from the default account's). Refuses an existing one,
     shares the totals cannot cover and an address another account serves."""
@@ -227,6 +242,7 @@ def add(settings: Settings, account_id: str, *, rpc_budget: int, thumb_budget: i
     return folder
 
 
+@_serialized_update
 def set_budget(settings: Settings, account_id: str, *, rpc_budget: int, thumb_budget: int) -> None:
     """Replace an account's shares; the server applies them (and the default account's rest) on its next call."""
     folder = _folder(settings, check_id(account_id))
@@ -237,6 +253,7 @@ def set_budget(settings: Settings, account_id: str, *, rpc_budget: int, thumb_bu
     _write(folder / ACCOUNT_FILE, {**data, "daily_rpc_budget": rpc_budget, "daily_thumb_budget": thumb_budget})
 
 
+@_serialized_update
 def bind_email(settings: Settings, account_id: str, email: str) -> bool:
     """Bind the account to the Google address its first sign-in proved. True when it is (now) that address."""
     folder = _folder(settings, account_id)
@@ -265,6 +282,7 @@ def bind_from_keeper(settings: Settings, account: Account) -> bool:
     return bind_email(settings, account.id, email)
 
 
+@_serialized_update
 def remove(settings: Settings, account_id: str) -> None:
     """Delete an account's record and state (cache and cursors included). Its browser profile and snapshot belong to
     the login service, which the admin command asks to delete them."""
@@ -276,15 +294,15 @@ def remove(settings: Settings, account_id: str) -> None:
 
 
 def keeper_status(account: Account) -> dict[str, Any] | None:
-    """What the login service's browser last saw for a linked account (``keeper.json``), without its address."""
-    if not account.linked:
-        return None
+    """What this account's custodian last observed, bound to its snapshot generation."""
     data = _read(account.session_dir / KEEPER_FILE)
     if data is None:
         return None
     checked = data.get("checked_at")
+    generation = data.get("generation")
     return {
         "state": data.get("state") if isinstance(data.get("state"), str) else None,
+        "generation": generation if type(generation) is int and generation >= 0 else None,
         "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(checked))
         if isinstance(checked, int | float)
         else None,

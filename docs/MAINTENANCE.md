@@ -7,6 +7,14 @@ with a private writable profile/state root, the existing snapshot export directo
 and narrowly scoped credential access. Do not give these mounts or credentials
 to a reader container.
 
+Credential automation is optional; hosted default-account owner recovery is available
+without it. The owner starts Connect or Reconnect from the authenticated My connections
+page, including when maintenance has positively detected a signed-out profile. Human
+OIDC authorizes that account-management action only: MCP client/workload permission
+still comes from the gateway, and native Google authority comes from the verified
+session. Neither manual recovery nor credential automation widens an agent's grant.
+See [permission boundaries and remaining project checks](CONNECTIONS.md).
+
 ```sh
 photos-mcp-maintenance keep \
   --root /maintenance --export-dir /exports/default \
@@ -48,6 +56,15 @@ sharing it. Never copy a profile while Chromium is running. Rehearse adoption
 and rollback with synthetic state; rollback must preserve the latest accounting.
 The human window's own further-account keeper remains independent and never
 submits credentials.
+
+Hosted default-account recovery runs `photos_maintenance.human` alongside this worker
+in the same custodian container and PID namespace. It holds the same profile lease,
+verifies a cold candidate, and promotes only after independent manual proof. Both
+startup and each keep recover its journal before warming; the shared pending marker
+keeps readers closed until profile and snapshot are consistent. See
+[Connections setup](CONNECTIONS.md) for the fixed private HTTP contract. Manual recovery
+does not refund credential attempts or reset cooldowns, and clears only the matching
+hold captured when that human attempt began.
 
 ## Verification
 

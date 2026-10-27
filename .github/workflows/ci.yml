@@ -21,3 +21,31 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       - run: make check
+
+  connections:
+    runs-on: ubuntu-latest
+    container: python:3.13-slim-trixie
+    timeout-minutes: 15
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_GC: '1'
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/browsers
+      XDG_CONFIG_HOME: /tmp/browser-settings
+      UV_LINK_MODE: copy
+    steps:
+      - name: Disposable identity and display dependencies
+        run: |
+          apt-get update -q && apt-get install -y -q --no-install-recommends ca-certificates curl git xvfb x11vnc
+          pip install --quiet uv
+          curl -fsSL https://github.com/pocket-id/pocket-id/releases/download/v2.19.1/pocket-id_linux_amd64 -o /tmp/pocket-id
+          printf '%s  /tmp/pocket-id\n' fbe58b3af6e225600136c7da033810d2d86436fbd13a135fa52205f467544436 | sha256sum --check --status
+          chmod +x /tmp/pocket-id
+          curl -fsSL https://github.com/novnc/noVNC/archive/refs/tags/v1.6.0.tar.gz -o /tmp/novnc.tar.gz
+          printf '%s  /tmp/novnc.tar.gz\n' 5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa | sha256sum --check --status
+          mkdir /tmp/novnc && tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - run: |
+          uv sync --locked --all-extras
+          uv run --frozen patchright install --with-deps chromium
+          uv run --frozen python -m signin_window.browser install-policy
+          export PHOTOS_TEST_CHROME="$(uv run --frozen python -c 'from patchright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          POCKET_ID_BIN=/tmp/pocket-id PHOTOS_LOGIN_NOVNC=/tmp/novnc uv run --frozen python scripts/connections_e2e.py

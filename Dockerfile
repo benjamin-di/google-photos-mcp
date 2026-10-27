@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # uid 1000 and works on a read-only root filesystem.
 RUN mkdir -p /session /state && chown 1000:1000 /state
 
+ARG VERSION=unknown
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG SOURCE_URL=unknown
@@ -24,6 +25,7 @@ LABEL org.opencontainers.image.title="photos-mcp" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
 ENV PYTHONUNBUFFERED=1 \

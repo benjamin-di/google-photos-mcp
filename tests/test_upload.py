@@ -692,7 +692,7 @@ def test_the_link_adds_to_the_account_that_made_it_and_expires(tmp_path):
     path = "/" + made["url"].rsplit("/", 1)[1]
     with TestClient(links.app()) as client:
         response = client.put(path, content=PNG)
-        assert response.status_code == 201 and asked == ["second"]
+        assert response.status_code == 201 and asked == ["second", "second"]  # Recheck before publication.
         assert response.json()["files_left"] == 99
         # The account was removed and added again (for someone else): the old link adds nothing to it.
         Svc.account = type("A", (), {"id": "second", "email": "other@example.com", "created_at": 9})()
@@ -725,3 +725,50 @@ def test_a_file_waits_for_an_upload_slot_before_it_is_read(tmp_path, monkeypatch
     assert busy.status_code == 503 and busy.json()["error"]["code"] == "busy"
     gate.release()
     assert gate.try_acquire()  # the waiting request never took the slot
+
+
+def test_upload_started_before_disconnect_cannot_publish_after_resume(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from photos_mcp.connection_controls import ConnectionAdmission
+    from photos_mcp.connections_auth import BrowserStore
+    from photos_mcp.uploads import UploadLinks
+
+    settings = make_settings(tmp_path, PHOTOS_PUBLIC_URL="https://example.com/photos")
+    store = BrowserStore(tmp_path / "controls")
+    admission = ConnectionAdmission(store)
+    published = []
+
+    class Svc:
+        account = SimpleNamespace(id="first", email="first@example.com", created_at=5)
+
+        def upload(self, *args, **kwargs):
+            published.append(True)
+            raise AssertionError("A stale upload reached the provider")
+
+        def record_error(self, code):
+            pass
+
+    svc = Svc()
+
+    def run_for(account, operation):
+        with admission.operation(account):
+            return operation(svc)
+
+    links = UploadLinks(settings, lambda _: svc, upload.Gate(1), run_for=run_for, revision_for=store.control)
+    made = links.create(svc)
+    path = "/" + made["url"].rsplit("/", 1)[1]
+    original_read = links._read
+
+    async def disconnect_during_body(request, staging, length):
+        await original_read(request, staging, length)
+        store.set_control("first", 1)
+        store.set_control("first", 0)
+
+    monkeypatch.setattr(links, "_read", disconnect_during_body)
+    with TestClient(links.app()) as client:
+        response = client.put(path, content=PNG)
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "account_not_connected"
+        assert client.get(path).status_code == 404
+    assert not published

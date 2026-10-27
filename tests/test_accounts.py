@@ -30,6 +30,8 @@ def make_settings(tmp_path: Path, **env: str) -> Settings:
         "PHOTOS_TRUSTED_ACCOUNT_HEADER": HEADER,
         "PHOTOS_DEFAULT_ACCOUNT": "main",
     }
+    if env.get("PHOTOS_LOGIN_URL"):
+        base["PHOTOS_DEFAULT_LOGIN_URL"] = "http://127.0.0.1:8081"
     return Settings.from_env({**base, **env})
 
 
@@ -296,7 +298,21 @@ class _Inline:
 
 def _client(settings) -> TestClient:
     auth = bearer_auth_from_env({"MCP_BEARER_TOKEN": f"{PROXY},{DIRECT}"})
-    app = server.create_server(server.Accounts.from_settings(settings), auth=auth).http_app(**server.HTTP_OPTIONS)
+    from photos_mcp.connections_auth import ConnectionsConfig
+
+    config = None
+    if settings.connect_enabled:
+        config = ConnectionsConfig(
+            "https://identity.example.com",
+            "photos-ui",
+            settings.public_url,
+            {"subject-one": "second"},
+            "photos-users",
+            settings.state_dir,
+        )
+    app = server.create_server(server.Accounts.from_settings(settings), auth=auth, connections=config).http_app(
+        **server.HTTP_OPTIONS
+    )
     return TestClient(app)
 
 
@@ -350,7 +366,8 @@ def test_a_server_built_from_settings_offers_links_when_configured(tmp_path):
         PHOTOS_LOGIN_TOKEN="l" * 32,
     )
     registry = server.Accounts.from_settings(settings)
-    assert registry.login is not None and registry.login.base == "http://photos-mcp-login:8080"
+    assert registry.login is not None and registry.login.linked.base == "http://photos-mcp-login:8080"
+    assert registry.login.default.base == settings.default_login_url
     with _client(settings) as client:
         listed = client.post(
             "/mcp",
@@ -362,6 +379,19 @@ def test_a_server_built_from_settings_offers_links_when_configured(tmp_path):
             },
         )
         assert "photos_connect" in {tool["name"] for tool in listed.json()["result"]["tools"]}
+
+
+def test_hosted_startup_refuses_to_put_default_in_a_different_profile_store(tmp_path):
+    from dataclasses import replace
+
+    configured = make_settings(
+        tmp_path,
+        PHOTOS_PUBLIC_URL="https://example.com",
+        PHOTOS_LOGIN_URL="http://photos-mcp-login:8080",
+        PHOTOS_LOGIN_TOKEN="l" * 32,
+    )
+    with pytest.raises(ConfigError, match="PHOTOS_DEFAULT_LOGIN_URL"):
+        server.Accounts.from_settings(replace(configured, default_login_url=None))
 
 
 def test_the_connect_tool_exists_only_with_sign_in_links(settings):
@@ -442,3 +472,34 @@ def test_admin_is_a_subcommand_of_the_server(monkeypatch):
     with pytest.raises(SystemExit) as done:
         server.main(["admin", "account", "list"])
     assert done.value.code == 0 and called == [["account", "list"]]
+
+
+def test_simultaneous_first_bindings_cannot_adopt_the_same_google_account(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    settings = make_settings(tmp_path)
+    for name in ("first", "second"):
+        accounts.add(settings, name, rpc_budget=100, thumb_budget=100)
+    original = accounts._write
+    writing, release = Event(), Event()
+
+    def delayed_write(path, record):
+        if path.parent.name == "first":
+            writing.set()
+            assert release.wait(5)
+        original(path, record)
+
+    monkeypatch.setattr(accounts, "_write", delayed_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(accounts.bind_email, settings, "first", "same@example.com")
+        assert writing.wait(5)
+        second = pool.submit(accounts.bind_email, settings, "second", "same@example.com")
+        try:
+            assert not second.done()
+        finally:
+            release.set()
+        assert first.result(timeout=5) is True
+        assert second.result(timeout=5) is False
+    assert accounts.load(settings, "first").email == "same@example.com"
+    assert accounts.load(settings, "second").email is None

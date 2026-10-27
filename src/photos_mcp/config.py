@@ -39,6 +39,7 @@ class Settings:
     # Sign-in links (photos_connect): the address people reach this server at, and the login service beside it.
     public_url: str | None = None
     login_url: str | None = None
+    default_login_url: str | None = None
     login_token: str | None = field(default=None, repr=False)
 
     @property
@@ -76,6 +77,7 @@ class Settings:
             account_sessions_dir=Path((env.get("PHOTOS_ACCOUNT_SESSIONS_DIR") or "").strip() or "/sessions"),
             public_url=_public_url(env),
             login_url=_login_url(env),
+            default_login_url=_login_url(env, "PHOTOS_DEFAULT_LOGIN_URL"),
             login_token=_login_token(env),
         )
 
@@ -96,13 +98,13 @@ def _header(env: Mapping[str, str]) -> str | None:
     return raw
 
 
-def _login_url(env: Mapping[str, str]) -> str | None:
+def _login_url(env: Mapping[str, str], name: str = "PHOTOS_LOGIN_URL") -> str | None:
     """The login service runs beside this server: plain http on a private network, host and port only."""
-    raw = (env.get("PHOTOS_LOGIN_URL") or "").strip().rstrip("/")
+    raw = (env.get(name) or "").strip().rstrip("/")
     if not raw:
         return None
     if not re.fullmatch(r"http://[a-z0-9][a-z0-9.-]{0,62}:[0-9]{2,5}", raw):
-        raise ConfigError("PHOTOS_LOGIN_URL must look like http://photos-mcp-login:8080")
+        raise ConfigError(f"{name} must look like http://photos-mcp-login:8080")
     return raw
 
 

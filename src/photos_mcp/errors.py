@@ -10,13 +10,12 @@ from typing import Any
 
 NEXT_STEP: dict[str, str] = {
     "session_unavailable": (
-        "The Google session snapshot is missing or unreadable. The operator must publish one "
-        "(photos-mcp-session); check photos_status later. Do not retry in a loop."
+        "The Google session snapshot is missing or unreadable. Open My connections with photos_connect "
+        "and reconnect, or publish a fresh snapshot; check photos_status later. Do not retry in a loop."
     ),
     "session_expired": (
-        "Google rejected the session. Retry once photos_status shows a newer generation (the "
-        "operator, or for a connected person the server's keeper, refreshes the session snapshot); if "
-        "photos_status then says not_signed_in, call photos_connect."
+        "Google rejected the session. Open My connections with photos_connect and reconnect. "
+        "Retry once photos_status shows a newer generation."
     ),
     "account_mismatch": (
         "The session belongs to a different Google account. Stop and tell the operator; this "
@@ -72,6 +71,11 @@ NEXT_STEP: dict[str, str] = {
     "not_signed_in": (
         "This person's Google account is not connected here, or Google ended its session. Call photos_connect and "
         "give the person the link it returns: they sign in to Google themselves there. Retry after they have."
+    ),
+    "connection_disconnected": (
+        "This person's Photos connection is disconnected or its removal needs confirmation. "
+        "Ask them to open My connections in their browser, sign in and reconnect or retry disconnect there. "
+        "Do not retry account tools until they have restored the connection."
     ),
     "account_not_connected": (
         "This person has no Google Photos account on this server. Nothing was done. Tell them to ask the operator "

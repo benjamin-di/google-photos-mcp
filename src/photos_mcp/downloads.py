@@ -6,6 +6,7 @@ Copies live in bounded memory and a restart revokes them. HEAD does not consume 
 
 from __future__ import annotations
 
+import contextlib
 import re
 import secrets
 import threading
@@ -38,13 +39,41 @@ class Copy:
     jpeg: bytes
     filename: str
     expires: float
+    revision: tuple[str, int] | None = None
+
+
+class AdmittedResponse(Response):
+    """Retain account admission until the actual response bytes are sent."""
+
+    def __init__(self, *args, guard, valid, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.guard, self.valid = guard, valid
+
+    async def __call__(self, scope, receive, send):
+        try:
+            with self.guard():
+                if self.valid():
+                    return await super().__call__(scope, receive, send)
+        except PhotosError:
+            pass
+        await Response(status_code=404, headers=HEADERS)(scope, receive, send)
 
 
 class DownloadLinks:
-    def __init__(self, public_url: str, service_for: Callable[[str | None], PhotosService], *, clock=time.time):
+    def __init__(
+        self,
+        public_url: str,
+        service_for: Callable[[str | None], PhotosService],
+        *,
+        clock=time.time,
+        revision_for=None,
+        guard_for=None,
+    ):
         self.public_url = public_url.rstrip("/")
         self.service_for = service_for
         self.clock = clock
+        self.revision_for = revision_for or (lambda account: None)
+        self.guard_for = guard_for or (lambda account: contextlib.nullcontext())
         self.links: dict[str, Copy] = {}
         self.lock = threading.Lock()
 
@@ -62,7 +91,8 @@ class DownloadLinks:
                 jpeg, info, _ = svc._thumbnail(key, max_px)
                 now = self.clock()
                 filename = f"photo-{len(items) + 1}.jpg"
-                copy = Copy(svc.account.id if svc.account else None, _identity(svc), jpeg, filename, now + TTL)
+                account = svc.account.id if svc.account else None
+                copy = Copy(account, _identity(svc), jpeg, filename, now + TTL, self.revision_for(account))
                 token = secrets.token_urlsafe(32)
                 with self.lock:
                     self.links = {t: c for t, c in self.links.items() if c.expires > now}
@@ -111,12 +141,17 @@ class DownloadLinks:
             return Response(status_code=404, headers=HEADERS)
         try:
             svc = self.service_for(copy.account)
-            if _identity(svc) != copy.identity:
+            if _identity(svc) != copy.identity or self.revision_for(copy.account) != copy.revision:
                 return Response(status_code=404, headers=HEADERS)
         except PhotosError:
             return Response(status_code=404, headers=HEADERS)
-        return Response(
+        return AdmittedResponse(
             b"" if request.method == "HEAD" else copy.jpeg,
+            guard=lambda: self.guard_for(copy.account),
+            valid=lambda: (
+                _identity(self.service_for(copy.account)) == copy.identity
+                and self.revision_for(copy.account) == copy.revision
+            ),
             media_type="image/jpeg",
             headers={
                 **HEADERS,

@@ -18,9 +18,11 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
 import functools
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -50,10 +52,13 @@ from .cache import ThumbCache
 from .client import AGENT_INPUT_CODES, PhotosService
 from .config import ConfigError, Settings
 from .connect import ConnectFlow
+from .connection_controls import ConnectionAdmission, publication_pending
+from .connections import Connections
+from .connections_auth import BrowserStore, ConnectionsConfig
 from .downloads import DownloadLinks
 from .errors import NEXT_STEP, PhotosError, invalid
-from .login_client import LoginClient, LoginUnavailable
-from .session import SessionReader
+from .login_client import LoginClient, LoginUnavailable, RoutedLoginClient
+from .session import SessionReader, read_snapshot
 from .state import StateStore
 from .transport import (
     IMAGE_CONCURRENCY,
@@ -74,7 +79,7 @@ READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, 
 # Download copies read the library but issue a fresh single-use capability each time.
 DOWNLOAD = {**READ, "idempotentHint": False}
 LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
-# photos_connect makes a link (state on this server), and changes nothing at Google.
+# Upload links allocate bounded transfer capabilities without changing Google.
 LINK = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 # Album changes: creating one is not idempotent; adding is (Google keeps one copy); removing is destructive.
 CREATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
@@ -246,6 +251,23 @@ class Accounts:
         self.default = default
         self.settings = settings  # None: one account only (a server built around one service)
         self.login = login
+        self.account_access = None
+        self.admission = None
+        if settings is not None:
+            folder = settings.state_dir / "connections"
+            marker = settings.state_dir / "connections-controls-initialized"
+            if (
+                os.environ.get("CONNECTIONS_REQUIRE_CONTROLS", "0") != "0"
+                or folder.exists()
+                or folder.is_symlink()
+                or marker.exists()
+                or marker.is_symlink()
+            ):
+                access = BrowserStore(folder)
+                self.account_access = lambda account: (
+                    not access.control(account)[1] and not publication_pending(access, account)
+                )
+                self.admission = ConnectionAdmission(access)
         self._sender_factory = sender_factory
         transport = getattr(default, "_t", None)
         self.pacer = getattr(transport, "pacer", None) or Pacer()
@@ -261,7 +283,13 @@ class Accounts:
         cls, settings: Settings, *, login: LoginClient | None = None, sender_factory: Callable[..., Any] = CurlSender
     ) -> Accounts:
         if login is None and settings.login_url and settings.login_token:
+            if not settings.default_login_url:
+                raise ConfigError("Hosted connections require PHOTOS_DEFAULT_LOGIN_URL for the native default account")
             login = LoginClient(settings.login_url, settings.login_token)
+            if settings.default_login_url:
+                login = RoutedLoginClient(
+                    login, LoginClient(settings.default_login_url, settings.login_token), settings.default_account
+                )
         account = accounts.default(settings)
         state = StateStore(
             settings.state_dir,
@@ -277,13 +305,18 @@ class Accounts:
             sender_factory=sender_factory,
         )
         service = PhotosService(
-            transport, ThumbCache(settings.cache_dir, settings.cache_max_bytes), account=account, sign_in_links=False
+            transport,
+            ThumbCache(settings.cache_dir, settings.cache_max_bytes),
+            account=account,
+            sign_in_links=settings.connect_enabled,
         )
         return cls(service, settings, sender_factory=sender_factory, login=login)
 
     def get(self, account_id: str | None) -> PhotosService:
         """The service of ``account_id`` (None: the default account). Unknown accounts are account_not_connected."""
         settings = self.settings
+        if self.account_access is not None and not self.account_access(account_id or settings.default_account):
+            raise PhotosError("connection_disconnected", log_detail="connection suspended")
         if settings is None:
             if account_id is not None:
                 raise PhotosError("account_not_connected", log_detail="a one-account server")
@@ -310,6 +343,18 @@ class Accounts:
             service = self._build(settings, account)
             self._others[account_id] = (account, service)
             return service
+
+    def operation(self, account_id):
+        account = account_id or (self.settings.default_account if self.settings else None)
+        return self.admission.operation(account) if self.admission else contextlib.nullcontext()
+
+    def revision(self, account_id):
+        account = account_id or (self.settings.default_account if self.settings else None)
+        return self.admission.store.control(account) if self.admission else None
+
+    def run(self, account_id, operation):
+        with self.operation(account_id):
+            return operation(self.get(account_id))
 
     def _build(self, settings: Settings, account: Account) -> PhotosService:
         state = StateStore(
@@ -391,7 +436,11 @@ def build_service(settings: Settings) -> PhotosService:
 
 
 def create_server(
-    service: PhotosService | Accounts | None = None, *, auth: Any = None, login: LoginClient | None = None
+    service: PhotosService | Accounts | None = None,
+    *,
+    auth: Any = None,
+    login: LoginClient | None = None,
+    connections: ConnectionsConfig | None = None,
 ) -> FastMCP:
     """Build the FastMCP server. ``service``/``auth``/``login`` are injectable for tests."""
     if isinstance(service, Accounts):
@@ -404,7 +453,19 @@ def create_server(
         registry.login = login  # an injected client wins over the one built from the settings
     settings = registry.settings
     header = settings.trusted_account_header if settings is not None else None
-    mcp = FastMCP("photos", instructions=INSTRUCTIONS, version=__version__, auth=auth, mask_error_details=True)
+    flow = None
+
+    @contextlib.asynccontextmanager
+    async def lifespan(server):
+        if flow is None:
+            yield {}
+        else:
+            async with flow.relay.lifespan():
+                yield {}
+
+    mcp = FastMCP(
+        "photos", instructions=INSTRUCTIONS, version=__version__, auth=auth, mask_error_details=True, lifespan=lifespan
+    )
     mcp.add_middleware(logs.ToolCallLog())
     mcp.add_middleware(TypedArgumentErrors())
 
@@ -415,38 +476,54 @@ def create_server(
 
     flow: ConnectFlow | None = None
     if settings is not None and settings.connect_enabled and registry.login is not None:
-        # Sign-in links (connect.py): pages people open in a browser, so outside the bearer; each needs its link id.
-        flow = ConnectFlow(settings, registry.login)
-        mcp._additional_http_routes.append(Mount("/connect", app=flow.app()))  # as fastmcp.contrib does
+        # All browser sign-in entry points share the owner-bound OIDC policy; no bearer-link fallback.
+        config = connections or ConnectionsConfig.from_env(settings.public_url, settings.state_dir)
+        if config.state_dir.resolve() != settings.state_dir.resolve():
+            raise ConfigError("Connections must retain controls in the Photos state directory")
+        portal = Connections(settings, registry.login, config, flow_factory=ConnectFlow)
+        flow = portal.flow
+        registry.account_access = portal.account_allowed
+        registry.admission = ConnectionAdmission(portal.auth.store)
+        portal.drain = registry.admission.drain
+        mcp.connections_ui = portal
+        mcp._additional_http_routes.append(Mount("/connections", app=portal.app()))
+        mcp._additional_http_routes.append(Mount("/connect", app=portal.viewer_app()))
     gate = Gate(UPLOAD_CONCURRENCY)  # uploads at once on this server, by links and photos_upload alike
     links: UploadLinks | None = None
     downloads: DownloadLinks | None = None
     if settings is not None and settings.public_url:
         # Upload links (uploads.py): a page and a PUT address, outside the bearer like the sign-in links.
-        links = UploadLinks(settings, registry.get, gate)
+        links = UploadLinks(settings, registry.get, gate, run_for=registry.run, revision_for=registry.revision)
         mcp._additional_http_routes.append(Mount("/uploads", app=links.app()))
-        downloads = DownloadLinks(settings.public_url, registry.get)
+        downloads = DownloadLinks(
+            settings.public_url, registry.get, revision_for=registry.revision, guard_for=registry.operation
+        )
         mcp._additional_http_routes.append(Mount("/downloads", app=downloads.app()))
 
     async def call(fn: Callable[..., T], *args: Any) -> T:
         """Run ``fn`` (a PhotosService method) for the caller's own account."""
+        svc = None
+
+        def invoke(service):
+            nonlocal svc
+            svc = service
+            return fn(service, *args)
+
         try:
-            svc = registry.get(caller_account(header))
+            account_id = caller_account(header)
+            return await anyio.to_thread.run_sync(functools.partial(registry.run, account_id, invoke))
         except PhotosError as exc:
             log.info("tool error %s (%s)", exc.code, exc.log_detail or "-")
-            raise ToolError(_json({"error": exc.payload()}), log_level=logging.WARNING) from None
-        try:
-            return await anyio.to_thread.run_sync(functools.partial(fn, svc, *args))
-        except PhotosError as exc:
-            log.info("tool error %s (%s)", exc.code, exc.log_detail or "-")
-            svc.record_error(exc.code)
+            if svc is not None:
+                svc.record_error(exc.code)
             # The caller's own mistakes are routine (INFO); Google-side failures are worth a
             # WARNING line. FastMCP and ToolCallLog log at this level, without a traceback.
             level = logging.INFO if exc.code in AGENT_INPUT_CODES else logging.WARNING
             raise ToolError(_json({"error": exc.payload()}), log_level=level) from None
         except Exception as exc:  # never echo exception text to the model
             log.error("tool crashed: %s", type(exc).__name__)
-            svc.record_error("internal_error")
+            if svc is not None:
+                svc.record_error("internal_error")
             raise ToolError(_json({"error": PhotosError("internal_error").payload()})) from None
 
     @mcp.tool(annotations=READ)
@@ -737,19 +814,34 @@ def create_server(
         return await call(PhotosService.canary)
 
     if flow is not None:
-        connect_flow = flow
 
-        def make_link(svc: PhotosService) -> dict[str, Any]:
-            signed_in = svc.status()["session"]["state"] == "ok"
-            return connect_flow.create(svc.account, signed_in=signed_in)
-
-        @mcp.tool(annotations=LINK)
+        @mcp.tool(annotations=LOCAL)
         async def photos_connect() -> dict[str, Any]:
-            """A one-time link where the person signs in to their own Google account (on Google's own page) so this
-            server can show them their photos: for the calling person's account only, valid for 20 minutes and one
-            sign-in; a newer link replaces it. Give the person the url and nothing else. Use it when a tool says
-            not_signed_in, or when the person asks to connect Google Photos."""
-            return await call(make_link)
+            """Open the owner's account connections page. Give the person the URL and nothing else.
+
+            The page requires their own identity-provider sign-in. Only their explicit Connect action
+            starts a Google sign-in; requesting this URL never interrupts an existing connection.
+            The URL does not expire, so expires_at is null.
+            """
+            try:
+                account = accounts.load(settings, caller_account(header) or settings.default_account)
+                signed_in = False
+                if portal.account_allowed(account.id):
+                    try:
+                        snapshot = read_snapshot(account.session_dir)
+                        signed_in = bool(account.email and snapshot.email.lower() == account.email.lower())
+                    except PhotosError:
+                        pass
+                return {
+                    "url": portal.config.public_url.rstrip("/") + "/connections/",
+                    "expires_at": None,
+                    "account_id": account.id,
+                    "signed_in": signed_in,
+                    "next_step": "Give the person this URL and nothing else; they sign in with their own "
+                    "identity and choose Connect or Reconnect. Requesting the URL changes no connection.",
+                }
+            except PhotosError as exc:
+                raise ToolError(_json({"error": exc.payload()}), log_level=logging.WARNING) from None
 
     return mcp
 
@@ -784,7 +876,15 @@ def main(argv: list[str] | None = None) -> None:
         # Our own startup message (configuration), never a tool result.
         print("photos-mcp:", *exc.args, file=sys.stderr)
         raise SystemExit(1) from None
-    server.run(transport="streamable-http", host=args.host, port=args.port, show_banner=False, **HTTP_OPTIONS)
+    # OIDC callbacks carry one-use grants; backend request URLs must never enter access logs.
+    server.run(
+        transport="streamable-http",
+        host=args.host,
+        port=args.port,
+        show_banner=False,
+        uvicorn_config={"access_log": False},
+        **HTTP_OPTIONS,
+    )
 
 
 if __name__ == "__main__":
