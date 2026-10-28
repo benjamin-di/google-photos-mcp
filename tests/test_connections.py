@@ -62,7 +62,8 @@ def start(client):
 
 def test_oidc_pkce_server_side_state_and_owner_bound_mcp_links(system):
     portal, provider, backend, client, settings = system
-    assert "Continue with" in client.get("/connections/").text
+    signed_out = client.get("/connections/")
+    assert signed_out.status_code == 303 and signed_out.headers["location"] == "/connections/login"
     assert sign_in(portal, provider, client).status_code == 303
     home = client.get("/connections/")
     assert "Example One" in home.text and "Sign-in required" in home.text
@@ -70,7 +71,8 @@ def test_oidc_pkce_server_side_state_and_owner_bound_mcp_links(system):
     cookies = str(client.cookies)
     assert all(secret not in cookies for secret in ["subject-one", "code_verifier", "fake-oidc-access-token"])
     link = portal.flow.create(accounts.load(settings, "first"), signed_in=False)
-    assert client.get(path(link["url"])).status_code == 200
+    page = client.get(path(link["url"]))
+    assert page.status_code == 200 and '"autoStart": true' in page.text  # owner-bound: no intro to click through
     other = portal.flow.create(accounts.load(settings, "second"), signed_in=False)
     for suffix in ["", "/state", "/novnc/vnc.html"]:
         response = client.get(path(other["url"]) + suffix)

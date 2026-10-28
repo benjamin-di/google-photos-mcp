@@ -252,7 +252,7 @@ async def exercise() -> int:
         page = await context.new_page()
         await page.goto(link["url"])
         await page.get_by_role("button", name="Connect", exact=True).click()
-        await page.click("#go")  # the page names the account and waits for the person to continue
+        # Owner-bound: the window opens on its own, without an intro to click through.
         frame_element = await page.wait_for_selector("iframe", timeout=60_000)
         frame = await frame_element.content_frame()
         assert frame is not None
@@ -305,7 +305,7 @@ async def exercise() -> int:
         page = await context.new_page()
         await page.goto(link["url"])
         await page.get_by_role("button", name="Connect", exact=True).click()
-        await page.click("#go")
+        # Owner-bound: the window opens on its own, without an intro to click through.
         await page.wait_for_selector("text=Connected", timeout=60_000)
         shown = await page.inner_text("#done")
         if "p•••@example.com" not in shown:

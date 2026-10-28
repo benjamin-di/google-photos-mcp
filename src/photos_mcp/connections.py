@@ -33,9 +33,12 @@ class Connections:
         self.prefix = urlsplit(config.public_url).path.rstrip("/")
         self.path = self.prefix + "/connections/"
         self.auth = BrowserLogin(config, **({"clock": clock} if clock else {}), transport=oidc_transport)
+        # Every link is bound to the signed-in owner who just pressed Connect (authorize refuses any other), so the
+        # window opens at once: the intro only matters for a link handed to someone.
         text = replace(
             TEXT,
             reconnect=True,
+            auto_start=True,
             return_url=self.path,
             intro_html="Connect Google Photos for <b>{label}</b>. Your application keeps the verified connection.",
         )
@@ -66,14 +69,8 @@ class Connections:
 
     async def index(self, request):
         person = self.auth.identity(request)
-        if not person:
-            return HTMLResponse(
-                self.page(
-                    "My connections",
-                    "Sign in to connect and manage your Google Photos account.",
-                    f'<a class=button href="{self.path}login">Continue with your identity provider</a>',
-                )
-            )
+        if not person:  # an unmapped person is refused at the callback, so this cannot loop
+            return RedirectResponse(self.path + "login", status_code=303)
         revision = self.auth.store.control(person["account"])[0]
         status = self.status(person)
         state = status["state"]

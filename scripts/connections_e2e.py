@@ -349,8 +349,7 @@ async def run():
                             response = admin.get(f"/api/users/{user['id']}/webauthn-credentials")
                             assert response.status_code == 200 and response.json(), "Passkey enrollment did not finish"
                             await context.clear_cookies()
-                            await page.goto(origin + "/connections/")
-                            await page.get_by_role("link", name="Continue with your identity provider").click()
+                            await page.goto(origin + "/connections/")  # signed out: straight to sign-in
                             for _ in range(6):
                                 await page.wait_for_timeout(500)
                                 if page.url == origin + "/connections/":
@@ -383,7 +382,7 @@ async def run():
                         assert other.status == 404
                         assert (await second.request.get(link + "/state")).status == 404
                         assert (await second.request.post(link + "/start", headers={"Origin": origin})).status == 404
-                        await page.get_by_role("button", name="Continue to Google's sign-in").click()
+                        # Owner-bound: the window opens without an intro to click through.
                         frame = page.frame_locator("iframe")
                         try:
                             await frame.locator("html.noVNC_connected").wait_for(timeout=30000)
@@ -424,7 +423,6 @@ async def run():
                         assert (
                             await second.request.post(native_link + "/start", headers={"Origin": origin})
                         ).status == 404
-                        await native_page.get_by_role("button", name="Continue to Google's sign-in").click()
                         native_frame = native_page.frame_locator("iframe")
                         await native_frame.locator("html.noVNC_connected").wait_for(timeout=30000)
                         await native_page.reload()
