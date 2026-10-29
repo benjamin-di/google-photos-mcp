@@ -573,7 +573,9 @@ def test_contact_sheet_of_24_tiles_is_fast_over_the_real_transport(tmp_path):
     legend, sheet = service.contact_sheet(keys)
     elapsed = time.monotonic() - started
     assert all("error" not in entry for entry in legend["legend"]) and sheet[:3] == b"\xff\xd8\xff"
-    assert elapsed < 5.0, elapsed  # well under 8 s (serial: ~19 s; 4 at a time: ~2.5 s)
+    # 8 s is the requirement; serial fetching takes ~19 s and 4 at a time ~2.5 s,
+    # so a CPU-contended worker must not fail a correct concurrent client.
+    assert elapsed < 8.0, elapsed
     assert json.dumps(legend)  # plain JSON
 
 
