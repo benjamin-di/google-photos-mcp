@@ -37,16 +37,13 @@ TEXT = PageText(
     service="Google",
     title="Connect your Google Photos",
     help_html=(
-        "Sign in on Google's own page below, as you usually do: with your password and the code or prompt Google asks "
-        "for (passkeys do not work in this window). Pasting works too. The page runs in a browser on the server your "
-        "assistant uses, which stays signed in to your Google account; your assistant can then search and look at "
-        "your photos, add photos, organise albums and, only after you say yes, move photos to the trash (Google keeps "
-        "them 60 days) or delete an album. You can sign it out any time in your Google Account (Security, Your "
-        "devices)."
+        "Sign in to Google in the remote browser below, using your password and any verification Google requests. "
+        "Device passkeys do not work here. Paste with Ctrl+V or Cmd+V. This application keeps the signed-in session; "
+        "assistant permissions are managed separately. You can also sign out this device in your Google Account's "
+        "Security settings."
     ),
     intro_html=(
-        "This link connects Google Photos for <b>{label}</b> on this assistant. Continue only if that is you: whoever "
-        "signs in here, their Google account is the one the assistant will use."
+        "Connect Google Photos for <b>{label}</b>. Sign in to the Google account you want this application to use."
     ),
     button="Continue to Google's sign-in",
     secure_host=r"(^|\.)google\.com$",
@@ -54,12 +51,13 @@ TEXT = PageText(
     starting="Opening Google…",
 ).with_outcomes(
     connected=(
-        "<p class=ok>✓</p><h1>Connected</h1><p>Your Google Photos ({email}) is connected. You can close this page and "
-        "go back to your assistant.</p>"
+        "<p class=ok>✓</p><h1>Connection saved</h1><p>Your Google Photos sign-in ({email}) is saved. "
+        "You can close this page and return to your assistant.</p>"
     ),
     wrong_account=(
-        "<h1>That's a different Google account</h1><p>This assistant is already connected to another Google account. "
-        "Sign in with that one, or ask the person who set it up to disconnect it first.</p>"
+        "<h1>That is a different Google account</h1>"
+        "<p>Sign in to the Google account already linked to this connection. "
+        "Disconnecting does not change which Google account is linked.</p>"
     ),
     in_use=(
         "<h1>That Google account is someone else's here</h1><p>It is already connected for another person on this "
@@ -70,7 +68,7 @@ TEXT = PageText(
         "Google Photos and try again.</p>"
     ),
     busy="<h1>The server's browser is busy</h1><p>Please try again in a few minutes.</p>",
-    expired="<h1>This link has expired</h1><p>Ask your assistant to connect Google Photos again for a new link.</p>",
+    expired="<h1>This link has expired</h1><p>Return to Connections to start a new Google Photos sign-in.</p>",
     failed="<h1>Something went wrong</h1><p>Nothing was connected.</p>",
 )
 
@@ -86,12 +84,21 @@ class ConnectFlow:
         revision=None,
         text=None,
         public_url=None,
+        deployment=None,
     ) -> None:
         assert settings.public_url
         self.settings, self.client = settings, client
         self.revision = revision or (lambda account: str(account.created_at))
         # The relay runs one hook at a time: the binding checks and the write go together.
-        self.relay = Relay(client, (public_url or settings.public_url).rstrip("/") + "/connect", text=text or TEXT,
+        if deployment is not None:
+            import functools
+
+            from .deployment import DeploymentRelay
+
+            relay = functools.partial(DeploymentRelay, deployment=deployment)
+        else:
+            relay = Relay
+        self.relay = relay(client, (public_url or settings.public_url).rstrip("/") + "/connect", text=text or TEXT,
                            clock=clock, authorize=authorize,
                            before_start=self._before_start, on_ended=self._ended)  # fmt: skip
 

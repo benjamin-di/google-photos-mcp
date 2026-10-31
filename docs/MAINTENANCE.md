@@ -15,6 +15,14 @@ still comes from the gateway, and native Google authority comes from the verifie
 session. Neither manual recovery nor credential automation widens an agent's grant.
 See [permission boundaries and remaining project checks](CONNECTIONS.md).
 
+Before running maintenance or its human HTTP service, provision the private
+`/maintenance` root with scope `maintenance` following
+[first-time deployment setup](DEPLOYMENT.md#first-time-http-setup). The root must
+be owned by the application UID with mode `0700`; its four deployment records
+must have mode `0600`. Keep existing records, holds and in-flight tickets when
+upgrading. Creating an empty directory alone is insufficient. A predecessor
+without this protocol needs a separately qualified adoption procedure.
+
 ```sh
 photos-mcp-maintenance keep \
   --root /maintenance --export-dir /exports/default \

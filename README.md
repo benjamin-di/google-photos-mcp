@@ -99,10 +99,13 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
    ```
 
    Or over HTTP (`/mcp`, bearer required; `/health` is open). The image listens on port
-   8000; publish it on localhost and run it as your own uid so it can read the snapshot:
+   8000; publish it on localhost and run it as your own uid so it can read the snapshot.
+   Before starting HTTP, prepare the private state root and its four deployment
+   records using [first-time HTTP setup](docs/DEPLOYMENT.md#first-time-http-setup),
+   with scope `reader`. An empty directory alone is insufficient. Keep existing
+   records when upgrading; do not rerun first-time setup on retained state.
 
    ```sh
-   mkdir -p ~/.photos-mcp/state
    TOKEN="$(openssl rand -hex 32)"; echo "bearer token: $TOKEN"
    docker run -d --name photos-mcp -p 127.0.0.1:8000:8000 --read-only --user "$(id -u):$(id -g)" \
      -e MCP_BEARER_TOKEN="$TOKEN" -e GOOGLE_PHOTOS_EXPECTED_EMAIL=you@example.com \
@@ -112,7 +115,9 @@ MCP client (stdio, or HTTP + bearer) ◀──▶ photos-mcp ─┘   state dir:
 
    Clients send `Authorization: Bearer <token>` to `http://127.0.0.1:8000/mcp`. Put a TLS
    reverse proxy in front before exposing it beyond localhost. Without Docker,
-   `photos-mcp` serves HTTP on 127.0.0.1:8000 (`--host`, `--port`).
+   `photos-mcp` serves HTTP on 127.0.0.1:8000 (`--host`, `--port`) and needs the
+   same provisioned reader root at `PHOTOS_STATE_DIR`. Stdio does not require
+   these HTTP deployment records.
 
 4. **Keep the session fresh.** Google rotates session cookies. With a browser profile,
    re-run `browser export` regularly, for example hourly from cron:
@@ -602,7 +607,16 @@ and their formats stay valid. See [Connections setup and recovery](docs/CONNECTI
 Login service settings: `PHOTOS_LOGIN_TOKEN` (required), `PHOTOS_LOGIN_PROFILES` (`/profiles`),
 `PHOTOS_LOGIN_SESSIONS` (`/sessions`), `PHOTOS_LOGIN_MINUTES` (20, a window's time),
 `PHOTOS_LOGIN_REFRESH_SECONDS` (3600), `PORT` (8080), `PHOTOS_LOGIN_UNMANAGED_BROWSER` (see
-above). Its API (behind the bearer) never returns a session; `/health` is open. As a compose file, beside the server:
+above). Its API (behind the bearer) never returns a session; `/health` is open.
+Before starting the Compose example, prepare `./state` (scope `reader`),
+`./profiles` (scope `login`) and `./maintenance` (scope `maintenance`) using
+[deployment setup](docs/DEPLOYMENT.md#first-time-http-setup). Each root must be
+owned by its container's application UID, have mode `0700` and contain the four
+`0600` deployment records. Set the container user or directory ownership to match;
+do not let Docker create these bind-mount roots as root-owned directories.
+Preserve existing records during upgrades, including holds and work tickets.
+
+As a Compose file, beside the server:
 
 ```yaml
 services:

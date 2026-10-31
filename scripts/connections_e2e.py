@@ -409,6 +409,7 @@ async def run():
                         # A new UI derives connection health from the saved snapshot.
                         replacement = Connections(settings, portal.client, config)
                         assert replacement.status({"account": "first"})["state"] == "connected"
+                        await page.locator("details.manage summary").click()
                         await page.get_by_role("button", name="Disconnect Google Photos", exact=True).click()
                         await page.get_by_text("Disconnected", exact=True).wait_for()
                         assert not (paths.session("first") / "meta.json").exists()
@@ -450,11 +451,12 @@ async def run():
                         assert not (paths.sessions / settings.default_account).exists()
                         assert not (settings.state_dir / "accounts" / settings.default_account).exists()
                         assert replacement.status({"account": settings.default_account})["state"] == "connected"
+                        await native_page.locator("details.manage summary").click()
                         await native_page.get_by_role("button", name="Disconnect Google Photos", exact=True).click()
                         await native_page.get_by_text("Disconnected", exact=True).wait_for()
                         assert read_snapshot(settings.session_dir).generation == 8
                         assert native.profile.is_dir() and not replacement.account_allowed(settings.default_account)
-                        assert "browser profile is retained" in await native_page.content()
+                        assert "browser profile is kept" in await native_page.content()
                         print(
                             "PASS: expired native default owner recovery, kept profile, account isolation and ledger",
                             flush=True,

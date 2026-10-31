@@ -441,6 +441,7 @@ def create_server(
     auth: Any = None,
     login: LoginClient | None = None,
     connections: ConnectionsConfig | None = None,
+    deployment=None,
 ) -> FastMCP:
     """Build the FastMCP server. ``service``/``auth``/``login`` are injectable for tests."""
     if isinstance(service, Accounts):
@@ -480,7 +481,9 @@ def create_server(
         config = connections or ConnectionsConfig.from_env(settings.public_url, settings.state_dir)
         if config.state_dir.resolve() != settings.state_dir.resolve():
             raise ConfigError("Connections must retain controls in the Photos state directory")
-        portal = Connections(settings, registry.login, config, flow_factory=ConnectFlow)
+        portal = Connections(
+            settings, registry.login, config, flow_factory=functools.partial(ConnectFlow, deployment=deployment)
+        )
         flow = portal.flow
         registry.account_access = portal.account_allowed
         registry.admission = ConnectionAdmission(portal.auth.store)
@@ -871,11 +874,24 @@ def main(argv: list[str] | None = None) -> None:
             return
         # Fail closed: /mcp answers 401 without a configured bearer.
         auth = bearer_auth_from_env()
-        server = create_server(auth=auth)
+        from pathlib import Path
+
+        from .deployment import Gate
+
+        Settings.from_env()  # Validate configuration before touching deployment metadata.
+        try:
+            deployment = Gate(Path(os.environ.get("PHOTOS_STATE_DIR", "/state")), "reader").start()
+        except (ValueError, OSError):
+            raise ConfigError("existing private deployment controls are required") from None
+        server = create_server(auth=auth, deployment=deployment)
     except (AuthError, ConfigError) as exc:
         # Our own startup message (configuration), never a tool result.
         print("photos-mcp:", *exc.args, file=sys.stderr)
         raise SystemExit(1) from None
+    from starlette.middleware import Middleware as ASGIMiddleware
+
+    from .deployment import Admission
+
     # OIDC callbacks carry one-use grants; backend request URLs must never enter access logs.
     server.run(
         transport="streamable-http",
@@ -883,6 +899,7 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         show_banner=False,
         uvicorn_config={"access_log": False},
+        middleware=[ASGIMiddleware(Admission, gate=deployment)],
         **HTTP_OPTIONS,
     )
 

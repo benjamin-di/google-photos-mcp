@@ -285,7 +285,7 @@ async def exercise() -> int:
                 return 1
             print("the window's browser refuses local files and its own pages (managed policy)")
 
-        await page.get_by_role("button", name="Cancel", exact=True).click()
+        await page.get_by_role("button", name="Cancel sign-in", exact=True).click()
         await page.close()  # closing/reloading alone now preserves an authenticated attempt
         for _ in range(300):  # closing ends Chromium, x11vnc and Xvfb, which can take a few seconds
             if not lock.locked() and all(login.ended_at for login in windows._windows.values()):
@@ -306,7 +306,7 @@ async def exercise() -> int:
         await page.goto(link["url"])
         await page.get_by_role("button", name="Connect", exact=True).click()
         # Owner-bound: the window opens on its own, without an intro to click through.
-        await page.wait_for_selector("text=Connected", timeout=60_000)
+        await page.get_by_role("heading", name="Connection saved", exact=True).wait_for(timeout=60_000)
         shown = await page.inner_text("#done")
         if "p•••@example.com" not in shown:
             print(f"FAIL: the page shows {shown!r}", file=sys.stderr)

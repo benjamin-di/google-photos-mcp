@@ -146,7 +146,7 @@ class DefaultSignIn:
             login.finish("failed")
 
 
-def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_policy=True):
+def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_policy=True, deployment=None):
     guard = config.guard()
 
     def params(body):
@@ -189,6 +189,11 @@ def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_polic
         x11vnc=os.environ.get("PHOTOS_LOGIN_X11VNC", "x11vnc"),
     )
 
+    if deployment is not None:
+        from photos_mcp.deployment import guarded_windows
+
+        guarded_windows(windows, deployment)
+
     async def forget(request):
         if request.path_params["account"] != config.account:
             return Response(status_code=404)
@@ -216,7 +221,16 @@ def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_polic
 
     @asynccontextmanager
     async def lifespan(application):
-        await asyncio.to_thread(recover, config)
+        if deployment is None:
+            await asyncio.to_thread(recover, config)
+        else:
+            from photos_mcp.deployment import Busy
+
+            try:
+                with deployment.work():
+                    await asyncio.to_thread(recover, config)
+            except Busy:
+                pass  # An inherited deployment hold never replays publication recovery.
         async with original_lifespan(application) as state:
             yield state
 
@@ -243,15 +257,22 @@ def main(argv=None):
         "--recover-only", action="store_true", help="recover the native journal and exit before serving"
     )
     args = parser.parse_args(argv)
+    from photos_mcp.deployment import Admission, Gate
+
     config = Config.from_env()
+    deployment = Gate(config.root, "maintenance").start()
     if args.recover_only:
-        recover(config)
+        with deployment.work():
+            recover(config)
         print('{"status":"recovered"}')
         return
     token = os.environ.get("PHOTOS_LOGIN_TOKEN", "")
     if len(token) < 32:
         raise ValueError("PHOTOS_LOGIN_TOKEN is required")
-    app = build_app(config, token=token, novnc_dir=Path(os.environ.get("NOVNC_DIR", "/opt/novnc")))
+    app = build_app(
+        config, token=token, novnc_dir=Path(os.environ.get("NOVNC_DIR", "/opt/novnc")), deployment=deployment
+    )
+    app.add_middleware(Admission, gate=deployment)
     uvicorn.run(
         app,
         host="0.0.0.0",

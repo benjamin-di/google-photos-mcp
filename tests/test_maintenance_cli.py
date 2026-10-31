@@ -15,6 +15,9 @@ from photos_maintenance.outcomes import HoldReason
 
 
 def test_cli_adopts_hold_and_spent_budget_without_browser(tmp_path, monkeypatch, capsys):
+    from test_deployment import provision
+
+    provision(tmp_path, "maintenance")
     state, budget = cli.stores(tmp_path)
     hold = state.record_hold("google", HoldReason.SIGN_IN_INTERRUPTED)
     state.record_publish("google", 17)
@@ -126,3 +129,16 @@ def test_custom_reader_needs_no_ambient_op_identity(tmp_path, monkeypatch):
     assert not any(value.value in {"op_cli", "op_service_token", "credential_reader"} for value in missing)
     monkeypatch.setenv("PHOTOS_MAINTENANCE_CREDENTIAL_READER", "absent_backend:create")
     assert any(value.value == "credential_reader" for value in keeper._readiness().missing)
+
+
+def test_a_connect_identity_satisfies_the_op_service_requirement(monkeypatch, tmp_path):
+    from photos_maintenance import cli
+
+    monkeypatch.delenv("PHOTOS_MAINTENANCE_CREDENTIAL_READER", raising=False)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    keeper = cli.build_keeper(tmp_path, tmp_path / "export", "owner@example.com", "op://Example/Item")
+    assert any(value.value == "op_service_token" for value in keeper._readiness().missing)
+    monkeypatch.setenv("OP_CONNECT_HOST", "http://connect.example.com:8080")
+    monkeypatch.setenv("OP_CONNECT_TOKEN", "synthetic-connect")
+    assert not any(value.value == "op_service_token" for value in keeper._readiness().missing)

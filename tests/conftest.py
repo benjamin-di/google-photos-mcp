@@ -21,6 +21,14 @@ from photos_mcp.session import SessionReader, Snapshot, read_snapshot
 from photos_mcp.state import StateStore
 from photos_mcp.transport import GoogleTransport, HttpResponse, Pacer, RpcResult
 
+
+@pytest.fixture(autouse=True)
+def no_inherited_connect_identity(monkeypatch):
+    # A developer shell may point op at a 1Password Connect server; fixtures use only what they set.
+    monkeypatch.delenv("OP_CONNECT_HOST", raising=False)
+    monkeypatch.delenv("OP_CONNECT_TOKEN", raising=False)
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 SESSION_FIXTURE = FIXTURES / "session"
 EMAIL = "owner@example.com"

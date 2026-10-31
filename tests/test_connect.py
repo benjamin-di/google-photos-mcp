@@ -198,7 +198,7 @@ def test_status_and_the_sign_in_errors_point_to_photos_connect(http):
 
 def test_a_replaced_link_closes_its_window_and_opens_no_more(http, login):
     first = link_path(owner_window(http))
-    assert http.post(first + "/start", json={}).json()["state"] == "starting"
+    assert http.post(first + "/start", json={}).json()["state"] in {"starting", "waiting"}
     link_path(owner_window(http))
     wait_for(lambda: login.closed)
     assert login.closed == ["login-00000000000"]
@@ -255,9 +255,20 @@ def test_guessing_ids_is_slowed_down(http):
     assert http.get(path, headers=headers).status_code == 200
 
 
-def test_the_link_expires_and_closes_its_window(http, login, monkeypatch):
+@pytest.mark.parametrize("advance_before_reply", [False, True])
+def test_the_link_expires_and_closes_its_window(http, login, monkeypatch, advance_before_reply):
+    if advance_before_reply:
+        original_start = relay_module.Relay.start
+
+        def start_and_advance(self, link, layout):
+            original_start(self, link, layout)
+            self.advance(link)
+
+        # A background tick may observe the waiting window before the start
+        # response is serialized. Expiry must close it in either schedule.
+        monkeypatch.setattr(relay_module.Relay, "start", start_and_advance)
     path = link_path(owner_window(http))
-    assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] == "starting"
+    assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] in {"starting", "waiting"}
     for link in [x for flow in FLOWS for x in flow.relay.links("second")]:
         link.expires = 0  # past
     assert http.get(path).status_code == 404
@@ -271,7 +282,7 @@ def test_the_link_expires_and_closes_its_window(http, login, monkeypatch):
 
 def test_a_sign_in_binds_the_links_account_to_the_address_it_proved(http, login, settings):
     path = link_path(owner_window(http))
-    assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] == "starting"
+    assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] in {"starting", "waiting"}
     # The login service is told which address it may accept: any but the ones other accounts serve.
     assert login.started == [{"account": "second", "layout": "phone", "email": None, "taken": ["owner@example.com"]}]
     assert http.get(path + "/state").json() == {"state": "waiting", "host": "accounts.google.com"}
@@ -338,8 +349,8 @@ def test_busy_cancel_and_the_start_limit(http, login):
     login.busy = True
     assert http.post(path + "/start", json={}).json()["state"] == "busy"
     login.busy = False
-    assert http.post(path + "/start", json={}).json()["state"] == "starting"
-    assert http.post(path + "/start", json={}).json()["state"] == "starting"  # no second window
+    assert http.post(path + "/start", json={}).json()["state"] in {"starting", "waiting"}
+    assert http.post(path + "/start", json={}).json()["state"] in {"starting", "waiting"}  # no second window
     assert http.post(path + "/cancel").status_code == 204
     assert login.closed == ["login-00000000000"]
     assert http.get(path + "/state").json()["state"] == "cancelled"

@@ -372,6 +372,9 @@ def test_recover_only_cli_uses_fixed_contract_without_opening_a_listener(native,
     for name, value in values.items():
         monkeypatch.setenv("PHOTOS_DEFAULT_LOGIN_" + name, value)
     monkeypatch.delenv("PHOTOS_LOGIN_TOKEN", raising=False)
+    from test_deployment import provision
+
+    provision(config.root, "maintenance")
     human_main(["--recover-only"])
     assert json.loads(capsys.readouterr().out) == {"status": "recovered"}
 
@@ -380,6 +383,9 @@ def test_native_acknowledge_recovers_interrupted_accounting_before_clearing_exac
     from photos_maintenance.cli import main
 
     config, control, promotion = native
+    from test_deployment import provision
+
+    provision(config.root, "maintenance")
     hold_id = target_store(config.root).load("google").hold.hold_id
     consumed = (config.root / "session-keeper" / "google.json").read_bytes()
     child = multiprocessing.get_context("fork").Process(target=crash_commit, args=(config, "accounting"))

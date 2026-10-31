@@ -8,6 +8,8 @@ import re
 from dataclasses import replace
 from urllib.parse import parse_qs, quote, urlsplit
 
+from signin_window.connections import disconnect_confirmation, timestamp
+from signin_window.connections import page as connection_page
 from signin_window.page import PageText
 from signin_window.relay import Link
 from starlette.applications import Starlette
@@ -83,24 +85,37 @@ class Connections:
                 else "<p>You can close this page while the connection is saved.</p>"
             )
         elif state == "disconnecting":
-            controls = self.form("disconnect", "Retry disconnect", revision)
+            controls = self.form("disconnect", "Finish disconnecting", revision)
         elif state == "setup_required":
             controls = "<p>Ask your administrator to finish setting up this account.</p>"
         elif state != "disconnected":
             controls += self.form("disconnect", "Disconnect Google Photos", revision)
         if status.get("managed"):
-            controls += "<p>Disconnect stops server access. Your existing browser profile is retained.</p>"
-        email = html.escape(status.get("account") or "No verified provider account yet")
+            controls += "<p class=muted>Your saved browser profile is kept.</p>"
+        email = html.escape(
+            status.get("account")
+            or (
+                "Your Google account will appear after sign-in"
+                if state in ("connecting", "saving")
+                else "No Google account connected"
+            )
+        )
         body = (
             f"<article><h2>Google Photos</h2><p id=connection-state role=status>{html.escape(status['label'])}</p>"
-            f"<p>{email}</p><p>{html.escape(status.get('detail', ''))}</p>{controls}</article>"
-            "<p>Connecting Google Photos does not give an agent permission to use it. "
-            "Manage agent access separately in your permission settings.</p>"
-            + self.form("logout", "Sign out", revision)
+            f"<p>{email}</p>"
+            + (timestamp(status["verified_at"]) if status.get("verified_at") else "")
+            + f"<p>{html.escape(status.get('detail', ''))}</p>{controls}</article>"
+            "<p class=muted>Connecting Google Photos does not give an assistant permission to use it. "
+            "Assistant permissions are managed separately.</p>"
+            + self.form("logout", "Sign out of Connections", revision)
         )
         return HTMLResponse(
-            self.page("My connections", "Signed in as " + person["name"], body),
-            headers={"Refresh": "2"} if state in ("connecting", "saving") else {},
+            self.page(
+                "Google Photos connection",
+                "Signed in to Connections as " + person["name"],
+                body,
+                refresh=state in ("connecting", "saving"),
+            ),
         )
 
     def status(self, person):
@@ -112,11 +127,11 @@ class Connections:
         if suspended:
             return {
                 "state": "disconnecting" if suspended == 2 else "disconnected",
-                "label": "Disconnect needs confirmation" if suspended == 2 else "Disconnected",
+                "label": "Access stopped — finish disconnecting" if suspended == 2 else "Disconnected",
                 "managed": not account.linked,
             }
         if publication_pending(self.auth.store, account.id):
-            return {"state": "saving", "label": "Recovering connection", "url": self.path}
+            return {"state": "saving", "label": "Finishing your saved connection", "url": self.path}
         pending = next(
             (
                 link
@@ -143,7 +158,7 @@ class Connections:
         if keeper.get("generation") != snapshot.generation:
             keeper = {}
         if not account.email or snapshot.email.lower() != account.email.lower():
-            return {"state": "not_connected", "label": "Connection could not be verified"}
+            return {"state": "not_connected", "label": "We could not confirm the Google account"}
         if keeper.get("state") == "signed_out":
             return {"state": "not_connected", "label": "Sign-in required"}
         clock = self.auth.store.clock()
@@ -156,9 +171,8 @@ class Connections:
             if stale or rejected or keeper.get("state") == "error"
             else "Connection saved",
             "account": accounts.mask_email(account.email),
-            "detail": "Last verified "
-            + snapshot.describe()["verified_at"]
-            + ". Current provider access is checked when the application uses it.",
+            "verified_at": snapshot.describe()["verified_at"],
+            "detail": "Google Photos access is checked when used.",
         }
 
     async def api_status(self, request):
@@ -242,43 +256,43 @@ class Connections:
         return RedirectResponse(self.path, status_code=303)
 
     async def logout(self, request):
-        if not self.origin_ok(request):
-            return Response(status_code=403)
-        request.session.clear()
-        return RedirectResponse(self.path, status_code=303)
+        return await self.auth.logout(request)
 
     def notice(self, message, status):
         return HTMLResponse(
             self.page(
-                "My connections",
+                "Google Photos connection",
                 message,
-                f'<a class=button href="{html.escape(self.path, quote=True)}">My connections</a>',
+                f'<a class=button href="{html.escape(self.path, quote=True)}">Back to Connections</a>',
             ),
             status_code=status,
         )
 
     def form(self, action, label, revision):
-        return (
+        kind = (
+            "danger"
+            if action == "disconnect"
+            else "quiet"
+            if action == "logout"
+            else "secondary"
+            if label == "Reconnect"
+            else "primary"
+        )
+        form = (
             f'<form method=post action="{self.path}{action}">'
             f'<input type=hidden name=revision value="{html.escape(revision, quote=True)}">'
-            f"<button>{html.escape(label)}</button></form>"
+            f'<button class="{kind}">{html.escape(label)}</button></form>'
         )
+        if action == "disconnect" and label.startswith("Disconnect"):
+            return disconnect_confirmation(
+                form,
+                "Google Photos",
+                "This stops this application from using your Google Photos connection. Your photos are not deleted.",
+            )
+        return form
 
-    @staticmethod
-    def page(title, intro, body):
-        return (
-            "<!doctype html><html lang=en><meta charset=utf-8>"
-            '<meta name=viewport content="width=device-width,initial-scale=1">'
-            f"<title>{html.escape(title)}</title><style>"
-            "body{font:17px/1.6 system-ui;margin:0;overflow-wrap:anywhere;background:#f5f6f8;color:#18212b}"
-            "main{max-width:44rem;margin:3rem auto;padding:1.2rem}article{background:white;"
-            "padding:1.5rem;border:1px solid #dce0e6;border-radius:14px}h1{font-size:2rem}"
-            "button,.button{font:inherit;display:inline-block;padding:.7rem 1rem;border-radius:8px;"
-            "background:#173c64;color:white;border:0;text-decoration:none;cursor:pointer}"
-            "form{display:inline-block;margin:.4rem .5rem .4rem 0}button:focus-visible,a:focus-visible"
-            "{outline:3px solid #b76400;outline-offset:3px}@media(max-width:600px){main{margin:0}button{width:100%}}"
-            f"</style><main><h1>{html.escape(title)}</h1><p>{html.escape(intro)}</p>{body}</main></html>"
-        )
+    def page(self, title, intro, body, *, refresh=False):
+        return connection_page(title, body, intro=intro, refresh=refresh, login_url=self.path + "login")
 
     def app(self):
         portal = Starlette(

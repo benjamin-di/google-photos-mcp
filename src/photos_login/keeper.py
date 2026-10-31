@@ -52,7 +52,9 @@ class Keeper:
         xvfb: str = "Xvfb",
         refresher: Refresher | None = None,
         clock: Callable[[], float] = time.time,
+        deployment=None,
     ) -> None:
+        self.deployment = deployment
         self.paths, self.browser_lock = paths, browser_lock
         self.every, self.retry = every, retry
         self.xvfb = xvfb
@@ -90,6 +92,17 @@ class Keeper:
                 self.refresh_one(account)
 
     def refresh_one(self, account: str) -> str | None:
+        from photos_mcp.deployment import Busy
+
+        if self.deployment is None:
+            return self._refresh_one(account)
+        try:
+            with self.deployment.work():
+                return self._refresh_one(account)
+        except Busy:
+            return None
+
+    def _refresh_one(self, account: str) -> str | None:
         """One refresh; returns the keeper state written, or None when the browser was busy (next round)."""
         data = self.paths.keeper(account) or {}
         email = data.get("email")

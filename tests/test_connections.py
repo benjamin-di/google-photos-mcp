@@ -68,6 +68,7 @@ def test_oidc_pkce_server_side_state_and_owner_bound_mcp_links(system):
     home = client.get("/connections/")
     assert "Example One" in home.text and "Sign-in required" in home.text
     assert "Example Two" not in home.text
+    assert "Your saved browser profile is kept" not in home.text
     cookies = str(client.cookies)
     assert all(secret not in cookies for secret in ["subject-one", "code_verifier", "fake-oidc-access-token"])
     link = portal.flow.create(accounts.load(settings, "first"), signed_in=False)
@@ -131,7 +132,7 @@ def test_reload_reuses_attempt_and_logout_or_expiry_removes_access(system):
     assert len(backend.started) == 1
     assert client.get(link).status_code == 200
     assert len(backend.started) == 1
-    assert client.post("/connections/logout", headers=origin).status_code == 303
+    assert client.post("/connections/logout", headers=origin).status_code == 200
     assert client.get(link + "/state").status_code == 404
     assert sign_in(portal, provider, client).status_code == 303
     portal.auth.store.clock = lambda: time.time() + 901
@@ -238,7 +239,7 @@ def test_returning_home_resumes_one_attempt_and_refreshes_during_save(system):
     url = start(client)
     home = client.get("/connections/")
     assert "Sign-in in progress" in home.text and "Continue sign-in" in home.text
-    assert url in home.text and home.headers["refresh"] == "2"
+    assert url in home.text and "data-refresh" in home.text and "refresh" not in home.headers
     origin = {"origin": "https://example.com"}
     client.post(url + "/start", headers=origin)
     attempt = next(iter(portal.flow.relay._links.values()))
@@ -246,7 +247,7 @@ def test_returning_home_resumes_one_attempt_and_refreshes_during_save(system):
     client.get(url + "/state")
     home = client.get("/connections/")
     assert "Saving connection" in home.text and "Continue sign-in" not in home.text
-    assert home.headers["refresh"] == "2" and len(backend.started) == 1
+    assert "data-refresh" in home.text and "refresh" not in home.headers and len(backend.started) == 1
 
 
 def test_disconnect_blocks_the_mcp_account_registry_even_with_a_saved_snapshot(system):
@@ -302,7 +303,7 @@ def test_default_owner_can_reconnect_without_changing_native_identity_or_storage
             owner_post(browser, "/connections/disconnect", headers={"origin": "https://example.com"}).status_code == 303
         )
         assert not managed.account_allowed(settings.default_account)
-        assert "browser profile is retained" in browser.get("/connections/").text
+        assert "browser profile is kept" in browser.get("/connections/").text
         assert owner_post(browser, "/connections/start", headers={"origin": "https://example.com"}).status_code == 303
         assert managed.account_allowed(settings.default_account)
         assert (settings.session_dir / "meta.json").exists()

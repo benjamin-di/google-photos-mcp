@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -13,10 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from signin_window.connections import page
 from signin_window.oidc import BrowserAuth, OIDCConfig
 from signin_window.oidc import BrowserStore as SessionStore
 from signin_window.state import atomic_private_write
-from starlette.responses import Response
+from starlette.responses import HTMLResponse
 
 from .accounts import valid_id
 from .config import ConfigError
@@ -219,7 +221,15 @@ class BrowserLogin(BrowserAuth):
         response = await super().callback(request)
         if response.status_code == 303 and self.mapped(request.session) is None:
             request.session.clear()
-            return Response("Sign-in could not be verified. Return to connections and try again.", status_code=403)
+            return HTMLResponse(
+                page(
+                    "This sign-in cannot manage a Google Photos connection",
+                    "<p>Sign in with the account that manages this connection, "
+                    "or ask your administrator to check access.</p>"
+                    f'<a class=button href="{html.escape(self.home, quote=True)}">Back to Connections</a>',
+                ),
+                status_code=403,
+            )
         return response
 
 

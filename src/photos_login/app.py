@@ -133,8 +133,9 @@ def main() -> None:
         profiles=Path(os.environ.get("PHOTOS_LOGIN_PROFILES") or "/profiles"),
         sessions=Path(os.environ.get("PHOTOS_LOGIN_SESSIONS") or "/sessions"),
     )
-    for folder in (paths.profiles, paths.sessions):
-        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    from photos_mcp.deployment import Admission, Gate, guarded_windows
+
+    deployment = Gate(paths.profiles, "login").start()
     browser_lock = threading.Lock()
     xvfb = os.environ.get("PHOTOS_LOGIN_XVFB") or "Xvfb"
     # Only for trying it out without the image: the window can then reach local files (window.py).
@@ -154,8 +155,11 @@ def main() -> None:
         browser_lock,
         every=_int("PHOTOS_LOGIN_REFRESH_SECONDS", 3600, 600, 6 * 3600),
         xvfb=xvfb,
+        deployment=deployment,
     )
+    guarded_windows(windows, deployment)
     threading.Thread(target=keeper.run, args=(threading.Event(),), daemon=True, name="keeper").start()
     novnc = Path(os.environ.get("PHOTOS_LOGIN_NOVNC") or "/opt/novnc")
     app = build_app(windows, keeper, paths, browser_lock, token=token, novnc_dir=novnc, require_policy=not unmanaged)
+    app.add_middleware(Admission, gate=deployment)
     uvicorn.run(app, host="0.0.0.0", port=_int("PORT", 8080, 1, 65535), log_level="warning")

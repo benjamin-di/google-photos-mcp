@@ -15,7 +15,7 @@ import signal
 from datetime import UTC, datetime
 from pathlib import Path
 
-from signin_window.automation.secrets import load_credential_reader
+from signin_window.automation.secrets import OpSecretReader, load_credential_reader
 from signin_window.leases import LeaseKind, ordered_file_lease
 from signin_window.sessions import AttemptBudget
 
@@ -69,7 +69,8 @@ def build_keeper(root: Path, export_dir: Path, expected_email: str, reference: s
         else:
             if shutil.which("op") is None:
                 missing.append(Requirement.OP_CLI)
-            if not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN", "").strip():
+            # The reader's own identity: a 1Password Connect server or a service account.
+            if not OpSecretReader().has_token:
                 missing.append(Requirement.OP_SERVICE_TOKEN)
         return ProviderReadiness(missing=tuple(missing))
 
@@ -101,7 +102,7 @@ def connection_guard():
     return PublicationGuard(BrowserStore(root, track_location=False), account)
 
 
-def main(argv=None):
+def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("action", choices=("keep", "status", "acknowledge"))
     parser.add_argument("--root", type=Path, default=Path(os.environ.get(PREFIX + "_ROOT", "/maintenance")))
@@ -152,6 +153,25 @@ def main(argv=None):
         code = 1
     print(json.dumps(payload, sort_keys=True))
     return code
+
+
+def main(argv=None):
+    # Status is observational; every mutating command, including acknowledgment,
+    # participates in the same cross-process gate as the human service.
+    arguments = __import__("sys").argv[1:] if argv is None else argv
+    if arguments and arguments[0] == "status":
+        return _main(arguments)
+    from photos_mcp.deployment import Busy, Gate
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--root", type=Path, default=Path(os.environ.get(PREFIX + "_ROOT", "/maintenance")))
+    options, _ = parser.parse_known_args(arguments)
+    try:
+        with Gate(options.root, "maintenance").work():
+            return _main(arguments)
+    except (Busy, ValueError, OSError):
+        print('{"outcome":"deployment_hold","needs_attention":true}')
+        return 73
 
 
 def run():
