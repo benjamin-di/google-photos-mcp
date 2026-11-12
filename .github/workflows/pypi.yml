@@ -33,6 +33,9 @@ jobs:
         run: |
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           [ "${GITHUB_REF_NAME#v}" = "$version" ] || { echo "tag $GITHUB_REF_NAME is not version $version" >&2; exit 1; }
+          python3 scripts/embed-build-identity.py "$version" "$GITHUB_SHA"
           uv build
+          python3 scripts/check-build-distributions.py "$version" "$GITHUB_SHA"
+          uv run --no-project --with "./dist/google_photos_mcp-$version-py3-none-any.whl" python scripts/check-build-identity.py "$version" "$GITHUB_SHA"
       - name: Upload
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/

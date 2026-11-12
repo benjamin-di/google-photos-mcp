@@ -183,13 +183,13 @@ argument, never pydantic's raw text.
 | Tool | Input | Output |
 |---|---|---|
 | `photos_search` | `query` (≤200), `media` all\|photos\|videos, `details`, `limit` 1–50 (20), `cursor` | items + `next_cursor` |
-| `photos_list` | `source` library\|archive\|album\|favourites\|recently_added\|trash, `album_id` (iff album), `from_date`/`to_date` (library and archive), `media`, `details`, `limit`, `cursor` | items + `next_cursor` (Google pages of 100, sliced); with `source=album` also `album: {id, url, title, count}` |
+| `photos_list` | `source` library\|archive\|album\|favourites\|recently_added\|trash, `album_id` (iff album), `from_date`/`to_date` (library and archive), `media`, `details`, `limit`, `cursor`, optional `expected_connection` (album only) | items + `next_cursor` (Google pages of 100, sliced); with `source=album` also `album: {id, url, title, count}` |
 | `photos_albums` | `limit`, `cursor` | `{id, url, title, count}`, plus `shared: true` for shared albums |
 | `photos_get` | `ids` ≤10 (one batchexecute for all) | the item shape plus `uploaded_at` (UTC), lat/lon, camera, original width/height, size, duration, albums, `source`, `original_quality` |
 | `photos_on_this_day` | `date` (today), `years` 1–20 (10), `per_year` 1–20 (6) | `{date, years: [{year, items, more}], years_checked}` |
 | `photos_album_create` | `title` (≤200), `ids` ≤50 | the new album `{id, url, title, count, shared}`, `added` |
 | `photos_album_add` | `album_id`, `ids` ≤50 (from search or list) | the album afterwards, `requested`, `added` (from its counts) |
-| `photos_album_remove` | `album_id`, `ids` ≤50 (as the album's own listing gives them) | the album afterwards, `removed` (from its counts) and `not_in_album` (ids it does not hold, left alone) |
+| `photos_album_remove` | `album_id`, `ids` ≤50 (as the album's own listing gives them), optional `expected_connection` | the album afterwards, `removed` (from its counts) and `not_in_album` (ids it does not hold, left alone) |
 | `photos_album_delete` | `album_id` (one of the account's own albums) | the album and `deleted` (read back: the album no longer opens). Its photos stay in the library |
 | `photos_delete` | `ids` ≤50 (from search or list) | `trashed`, `not_found` (not items of this library) and per id `in_trash` (read back from the trash) |
 | `photos_restore` | `ids` ≤50 (as `photos_list(source=trash)` gives them) | `restored`, `not_in_trash` and per id `restored` (read back from the trash) |
@@ -202,6 +202,13 @@ argument, never pydantic's raw text.
 | `photos_status` | – | account, generation, snapshot age, breaker, budgets left, cache, last error |
 | `photos_canary` | – | `{ok, code, checked_at, cached, snapshot_age_s, generation}` (monitoring) |
 | `photos_connect` | – | the authenticated owner's connections entry: `{url, expires_at: null, account_id, signed_in, next_step}` ([Signing in with a link](#signing-in-with-a-link)) |
+
+Managed native album listings can return `connection_epoch` for conditional reads and
+removal. This is distinct from the native snapshot generation and requires explicitly
+verified guarded publication custody; see [Conditional album cleanup](docs/conditional-album-cleanup.md).
+Pass the same optional `expected_connection` to `photos_get` and `photos_download`
+for bound metadata and retained JPEG capture. These validate returned provider item
+identities and bypass shared thumbnail caches; see [Bound capture reads](docs/conditional-capture-proposal.md).
 
 Items have one shape in search, list, album and get, every key present (null when
 unknown): `{id, url, type, taken_at, tz_known, filename, description, place, favourite,
@@ -307,7 +314,11 @@ archive, which use fixed Google pages of 100); the result says `dedupe_required`
 
 ### Errors
 
-Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable"}}`:
+Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable"}}`.
+Write/removal failures can additionally include `mutation: {phase, definitely_unsent}`.
+For removal errors after a possible write, `retryable` is false regardless of code; only explicit
+`before_write` evidence proves that invocation was unsent. Never repeat an uncertain
+removal automatically; see [mutation evidence](docs/conditional-album-cleanup.md#mutation-evidence).
 
 | Code | Detected by | Reaction |
 |---|---|---|
@@ -326,6 +337,7 @@ Errors are tool errors whose text is `{"error": {"code", "next_step", "retryable
 | `invalid_argument`, `invalid_cursor`, `cursor_expired`, `internal_error` | our own checks | as named |
 | `not_signed_in` | a further account without a snapshot (never connected, or its browser was signed out), or not yet bound to a Google address | `photos_connect` gives the person a sign-in link |
 | `account_not_connected` | the proxy named an account that is not configured, named none, or another bearer named one | the operator adds the account; never served from another account |
+| `connection_changed` | captured binding changed, unavailable, or unsupported | keep retained items; inspect the original connection, never substitute a new token automatically |
 | `connection_disconnected` | the account is disconnected or deletion needs confirmation | open My connections and reconnect or retry disconnect |
 | `connect_unavailable` | a connection request has no configured account | configure the account before connecting; the default uses the same owner page |
 | `connect_limited` | more than 6 links an hour for one account | give the newest link |
@@ -454,7 +466,7 @@ flows back from photos-mcp to it.
 | `PHOTOS_UPLOAD_MAX_BYTES` | 2 GiB | the largest file `photos_upload` and upload links take (1 MiB to 10 GiB) |
 | `PHOTOS_BUDGET_TZ` | `UTC` | IANA time zone whose midnight resets the budgets |
 | `PHOTOS_CACHE_MAX_BYTES` | 2 GiB | thumbnail cache, LRU; 0 disables it |
-| `LOG_LEVEL` | `INFO` | photos-mcp's own log lines, JSON on stderr; FastMCP's startup lines are plain text; HTTP access logs are disabled to keep browser grants out of logs |
+| `LOG_LEVEL` | `INFO` | application and framework diagnostics, JSON on stderr with product version, source revision and process instance; HTTP access logs are disabled to keep browser grants out of logs |
 | `PHOTOS_TRUSTED_ACCOUNT_HEADER` | – | the header the authenticating proxy names the account in ([Accounts](#accounts)); unset: every request is the default account's |
 | `PHOTOS_DEFAULT_ACCOUNT` | `default` | the default account's id (what the proxy's header says for it) |
 | `PHOTOS_ACCOUNT_SESSIONS_DIR` | `/sessions` | the further accounts' snapshots, one directory per account (written by the login service), read-only |
@@ -747,3 +759,24 @@ derives its parser fixtures from [Google-Photos-Toolkit](https://github.com/xob0
 both MIT. See `NOTICE` and `THIRD_PARTY_NOTICES`.
 
 Optional operator-owned account upkeep is documented in [Account maintenance](docs/MAINTENANCE.md).
+
+### Build identity
+
+The App, upload pages and local sign-in denial page display the installed product
+version and source revision. Hover the revision to read its full value. Existing
+application, framework and operator diagnostics carry `service`, `version`,
+`source_revision` and an opaque process `instance`, including at DEBUG level.
+The native MCP handshake continues to report the product version.
+
+Publishers embed identity before installing the package. Both image recipes require
+`VERSION` matching `pyproject.toml` and a full `VCS_REF`; the public package publisher
+uses the public source commit. Runtime environment variables cannot relabel the
+installed build. Editable development reports revision `unknown`. To build a wheel
+or source distribution locally, first run
+`python3 scripts/embed-build-identity.py 0.13.1 "$(git rev-parse HEAD)"`, then
+`uv build` and `python3 scripts/check-build-distributions.py 0.13.1 "$(git rev-parse HEAD)"`.
+Noneditable packages without a valid matching stamp fail admission.
+
+Connections and dependency-rendered browser pages need released renderer support
+and a normal dependency update before they can display this application's identity.
+Browser vendor pages and command result JSON retain their existing formats.

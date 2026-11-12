@@ -15,7 +15,6 @@ refused, never replaced by another.
 
 from __future__ import annotations
 
-import argparse
 import base64
 import binascii
 import contextlib
@@ -23,11 +22,11 @@ import functools
 import json
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import time
 from collections.abc import Callable
-from importlib import resources
 from typing import Annotated, Any, Literal, TypeVar
 
 import anyio.to_thread
@@ -48,9 +47,10 @@ from starlette.routing import Mount
 from . import __version__, accounts, fetch, logs
 from .accounts import Account
 from .auth import PROXY_CLIENT, AuthError, bearer_auth_from_env
+from .build_pages import view_html
 from .cache import ThumbCache
 from .client import AGENT_INPUT_CODES, PhotosService
-from .config import ConfigError, Settings
+from .config import ConfigError, Settings, StartupConfigError
 from .connect import ConnectFlow
 from .connection_controls import ConnectionAdmission, publication_pending
 from .connections import Connections
@@ -113,9 +113,7 @@ Day = Annotated[str | None, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="A
 # loads nothing else and opens photos.google.com links through the host.
 VIEW_URI = "ui://photos/view.html"
 VIEW_META = "photos/view"
-VIEW_HTML = (
-    (resources.files("photos_mcp") / "view.html").read_text(encoding="utf-8").replace("__VERSION__", __version__)
-)
+VIEW_HTML = view_html()
 
 
 class Pick(BaseModel):
@@ -251,6 +249,9 @@ class Accounts:
         self.default = default
         self.settings = settings  # None: one account only (a server built around one service)
         self.login = login
+        # Explicit custody assertion: every publisher of this native account uses
+        # the same durable PublicationGuard. Standalone/further accounts cannot opt in.
+        self.conditional_native_account = os.environ.get("PHOTOS_CONDITIONAL_NATIVE_ACCOUNT")
         self.account_access = None
         self.admission = None
         if settings is not None:
@@ -352,7 +353,31 @@ class Accounts:
         account = account_id or (self.settings.default_account if self.settings else None)
         return self.admission.store.control(account) if self.admission else None
 
-    def run(self, account_id, operation):
+    def run(self, account_id, operation, *, expected_connection=None, connection_listing=False):
+        settings = self.settings
+        account = account_id or (settings.default_account if settings else None)
+        # Further-account and standalone exporters do not share the native publication fence.
+        supported = (
+            self.admission is not None
+            and settings is not None
+            and account == settings.default_account
+            and account == self.conditional_native_account
+            and bool(settings.default_login_url)
+            and self.admission.store.adopted(account)
+            and self.admission.store.control(account)[0] != "initial"
+        )
+        if expected_connection is not None and not supported:
+            raise PhotosError("connection_changed")
+        if supported and (connection_listing or expected_connection is not None):
+            scope = str(settings.session_dir) + "\0" + (settings.expected_email or "")
+            try:
+                with self.admission.bound_operation(account, scope, expected_connection) as token:
+                    # Concurrent unbound calls must not relabel old cached pages.
+                    service = self.get(account_id).fresh_view()
+                    result = operation(service)
+                    return {**result, "connection_epoch": token}
+            except sqlite3.OperationalError:
+                raise PhotosError("busy", log_detail="connection control database unavailable") from None
         with self.operation(account_id):
             return operation(self.get(account_id))
 
@@ -503,7 +528,9 @@ def create_server(
         )
         mcp._additional_http_routes.append(Mount("/downloads", app=downloads.app()))
 
-    async def call(fn: Callable[..., T], *args: Any) -> T:
+    async def call(
+        fn: Callable[..., T], *args: Any, expected_connection=None, connection_listing=False, removal=False
+    ) -> T:
         """Run ``fn`` (a PhotosService method) for the caller's own account."""
         svc = None
 
@@ -514,8 +541,22 @@ def create_server(
 
         try:
             account_id = caller_account(header)
-            return await anyio.to_thread.run_sync(functools.partial(registry.run, account_id, invoke))
+            return await anyio.to_thread.run_sync(
+                functools.partial(
+                    registry.run,
+                    account_id,
+                    invoke,
+                    expected_connection=expected_connection,
+                    connection_listing=connection_listing,
+                )
+            )
         except PhotosError as exc:
+            if removal and exc.mutation is None:
+                exc = exc.at_mutation("before_write" if svc is None else "write_attempted")
+            elif not removal and exc.mutation is not None:
+                # Only removal tracks a complete invocation's precise phases;
+                # never promote another operation's per-RPC proof to tool proof.
+                exc = exc.at_mutation("write_attempted")
             log.info("tool error %s (%s)", exc.code, exc.log_detail or "-")
             if svc is not None:
                 svc.record_error(exc.code)
@@ -527,7 +568,10 @@ def create_server(
             log.error("tool crashed: %s", type(exc).__name__)
             if svc is not None:
                 svc.record_error("internal_error")
-            raise ToolError(_json({"error": PhotosError("internal_error").payload()})) from None
+            error = PhotosError("internal_error")
+            if removal:
+                error = error.at_mutation("before_write" if svc is None else "write_attempted")
+            raise ToolError(_json({"error": error.payload()})) from None
 
     @mcp.tool(annotations=READ)
     async def photos_search(
@@ -564,18 +608,26 @@ def create_server(
         details: Details = False,
         limit: Limit = 20,
         cursor: Cursor = None,
+        expected_connection: Annotated[
+            str | None, Field(min_length=64, max_length=64, pattern="^[a-f0-9]{64}$")
+        ] = None,
     ) -> dict[str, Any]:
         """List the library newest-first by taken date (archive excluded; from_date/to_date for
         an exact range of the items' own local dates), the archive, one album, the favourites,
         or what was uploaded most recently. Same item shape as photos_search; place is set
-        where Google's listing carries it (details=true adds it, with lat, lon and camera)."""
+        where Google's listing carries it (details=true adds it, with lat, lon and camera).
+        A supported managed album listing returns connection_epoch, distinct from freshness.generation.
+        Retain it and pass expected_connection on subsequent album reads/removal. Unsupported setups provide
+        no binding. Start a fresh complete listing to observe exact IDs; recovered cursors cannot prove absence."""
 
         def run(svc: PhotosService) -> dict[str, Any]:
             return svc.list(
                 source, album_id, limit, cursor, from_date=from_date, to_date=to_date, media=media, details=details
             )
 
-        return await call(run)
+        if expected_connection is not None and source != "album":
+            raise ToolError(_json({"error": invalid("expected_connection requires source=album").payload()}))
+        return await call(run, expected_connection=expected_connection, connection_listing=source == "album")
 
     @mcp.tool(annotations=READ)
     async def photos_albums(limit: Limit = 20, cursor: Cursor = None) -> dict[str, Any]:
@@ -585,11 +637,16 @@ def create_server(
     @mcp.tool(annotations=READ)
     async def photos_get(
         ids: Annotated[list[str], Field(min_length=1, max_length=10, description="Item ids (max 10)")],
+        expected_connection: Annotated[
+            str | None, Field(min_length=64, max_length=64, pattern="^[a-f0-9]{64}$")
+        ] = None,
     ) -> dict[str, Any]:
         """Details per item, all ids in one Google request: the item shape of photos_search
         plus uploaded_at (UTC), lat/lon, camera, width/height (original), size_bytes,
-        duration_s and albums. Failed items carry their own error."""
-        return await call(PhotosService.get, ids)
+        duration_s and albums. Failed items carry their own error. For conditional capture,
+        pass the original album listing's connection_epoch as expected_connection; successful
+        responses retain that binding and validate each returned provider item identity."""
+        return await call(PhotosService.get, ids, expected_connection=expected_connection)
 
     if downloads is not None:
 
@@ -597,13 +654,19 @@ def create_server(
         async def photos_download(
             ids: Annotated[list[str], Field(min_length=1, max_length=10, description="Photo ids (max 10)")],
             max_px: Annotated[int, Field(ge=256, le=4096, description="JPEG longest edge in pixels")] = 2048,
+            expected_connection: Annotated[
+                str | None, Field(min_length=64, max_length=64, pattern="^[a-f0-9]{64}$")
+            ] = None,
         ) -> dict[str, Any]:
             """Make one-time download links for up to 10 photos, suitable for another tool's
             file import (WhatsApp send_file: source_url). JPEG copies, at most max_px; not originals.
             Returns items {id, url, filename, expires_at, mime_type, size_bytes, width, height, original:false}.
             One GET per link, valid 10 minutes; HEAD does not consume it. Videos return an item error.
-            Pass links straight to the importing tool, without opening them first."""
-            return await call(lambda svc: downloads.create(svc, ids, max_px))
+            Pass links straight to the importing tool, without opening them first. Conditional capture
+            uses expected_connection from the original album listing, validates provider item identity
+            and retains JPEG bytes under that binding without shared thumbnail-cache reads or writes.
+            A later link fetch serves those retained bytes, not current album membership."""
+            return await call(lambda svc: downloads.create(svc, ids, max_px), expected_connection=expected_connection)
 
     @mcp.tool(annotations=READ)
     async def photos_contact_sheet(
@@ -706,11 +769,18 @@ def create_server(
             list[str],
             Field(min_length=1, max_length=50, description="Item ids as photos_list(source=album) gives them (max 50)"),
         ],
+        expected_connection: Annotated[
+            str | None, Field(min_length=64, max_length=64, pattern="^[a-f0-9]{64}$")
+        ] = None,
     ) -> dict[str, Any]:
         """Take up to 50 items out of an album; they stay in the library. Only ids the album's own listing holds are
         removed (not_in_album: the others). Ask the person first, showing which photos leave the album. Returns the
-        album afterwards and removed."""
-        return await call(PhotosService.album_remove, album_id, ids)
+        album afterwards and removed. For conditional cleanup pass the connection_epoch from the original album
+        listing as expected_connection. A changed or unsupported binding refuses before removal. An uncertain
+        outcome must never be repeated automatically; counts alone do not prove exact-ID absence."""
+        return await call(
+            PhotosService.album_remove, album_id, ids, expected_connection=expected_connection, removal=True
+        )
 
     @mcp.tool(annotations=REMOVE)
     async def photos_album_delete(
@@ -850,12 +920,24 @@ def create_server(
 
 
 def main(argv: list[str] | None = None) -> None:
+    logs.setup("photos")
+    try:
+        _main(argv)
+    except (AuthError, StartupConfigError) as error:
+        logs.diagnostic(str(error))
+        raise SystemExit(1) from None
+    except (ConfigError, ValueError, OSError, OverflowError) as error:
+        logs.diagnostic(f"Check server configuration and local state ({type(error).__name__})")
+        raise SystemExit(1) from None
+
+
+def _main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["admin"]:
         from . import admin
 
         raise SystemExit(admin.main(argv[1:]))
-    parser = argparse.ArgumentParser(prog="photos-mcp", description="MCP server for Google Photos libraries.")
+    parser = logs.SafeParser(prog="photos-mcp", description="MCP server for Google Photos libraries.")
     parser.add_argument(
         "--transport",
         choices=("http", "stdio"),
@@ -867,27 +949,23 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--port", type=int, default=8000, help="HTTP port (default 8000)")
     args = parser.parse_args(argv)
-    logs.setup("photos")
+    if not 1 <= args.port <= 65535:
+        parser.error("invalid HTTP port")
+    if args.transport == "stdio":
+        create_server().run(transport="stdio", show_banner=False)
+        return
+    # Fail closed: /mcp answers 401 without a configured bearer.
+    auth = bearer_auth_from_env()
+    from pathlib import Path
+
+    from .deployment import Gate
+
+    Settings.from_env()  # Validate configuration before touching deployment metadata.
     try:
-        if args.transport == "stdio":
-            create_server().run(transport="stdio", show_banner=False)
-            return
-        # Fail closed: /mcp answers 401 without a configured bearer.
-        auth = bearer_auth_from_env()
-        from pathlib import Path
-
-        from .deployment import Gate
-
-        Settings.from_env()  # Validate configuration before touching deployment metadata.
-        try:
-            deployment = Gate(Path(os.environ.get("PHOTOS_STATE_DIR", "/state")), "reader").start()
-        except (ValueError, OSError):
-            raise ConfigError("existing private deployment controls are required") from None
-        server = create_server(auth=auth, deployment=deployment)
-    except (AuthError, ConfigError) as exc:
-        # Our own startup message (configuration), never a tool result.
-        print("photos-mcp:", *exc.args, file=sys.stderr)
-        raise SystemExit(1) from None
+        deployment = Gate(Path(os.environ.get("PHOTOS_STATE_DIR", "/state")), "reader").start()
+    except (ValueError, OSError):
+        raise ConfigError("existing private deployment controls are required") from None
+    server = create_server(auth=auth, deployment=deployment)
     from starlette.middleware import Middleware as ASGIMiddleware
 
     from .deployment import Admission
@@ -898,7 +976,7 @@ def main(argv: list[str] | None = None) -> None:
         host=args.host,
         port=args.port,
         show_banner=False,
-        uvicorn_config={"access_log": False},
+        uvicorn_config={"access_log": False, "log_config": None},
         middleware=[ASGIMiddleware(Admission, gate=deployment)],
         **HTTP_OPTIONS,
     )

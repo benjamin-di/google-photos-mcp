@@ -54,7 +54,7 @@ def native(tmp_path):
 
 class Login:
     def __init__(self, config):
-        self.params = dict(epoch=config.guard().check(), taken=[])
+        self.params = dict(epoch=config.guard().attempt(config.guard().store.control(config.account)[0]), taken=[])
         self.layout, self.deadline = "desktop", time.monotonic() + 30
         self.cancelled = threading.Event()
         self.state = "starting"
@@ -90,14 +90,20 @@ def verifier(*, profile, session_dir, email, min_generation, on_state, **kwargs)
     return {"email": email, "generation": min_generation + 1}
 
 
-def test_manual_default_success_preserves_accounting_and_native_paths(native):
-    config, _, promotion = native
+@pytest.mark.parametrize("suspended", [0, 1])
+def test_manual_default_success_preserves_accounting_and_native_paths(native, suspended):
+    config, control, promotion = native
+    control.set_control("main", suspended)
+    epoch = control.control("main")[0]
     before = target_store(config.root).load("google")
     ledger = config.root / "session-keeper" / "google.json"
     consumed = ledger.read_bytes()
     login = Login(config)
     DefaultSignIn(config, sign_in=verifier, require_policy=False)(login)
     assert login.state == "connected"
+    assert control.control("main") == (epoch, 0)
+    with config.guard().observe(epoch) as binding:
+        assert binding
     assert (promotion.profile / "identity").read_text() == "manually verified candidate"
     assert read_snapshot(config.export).generation == 8
     after = target_store(config.root).load("google")
@@ -190,7 +196,7 @@ def crash_commit(config, point):
 
         promotion.promote(
             config.guard(),
-            config.guard().check(),
+            config.guard().attempt(config.guard().store.control(config.account)[0]),
             generation=8,
             hold_id=target_store(config.root).load("google").hold.hold_id,
             checkpoint=checkpoint,
@@ -230,7 +236,7 @@ def test_unknown_pending_marker_is_never_cleared_without_its_journal(native):
     config, control, promotion = native
     marker = control.path.parent / "native-publication-main.json"
     atomic_private_write(marker, json.dumps({"id": "unrecognized", "phase": "prepared"}).encode())
-    with lease(config.root), pytest.raises(ValueError, match="no matching journal"):
+    with lease(config.root), pytest.raises(ValueError, match="recovery_required"):
         promotion.recover()
     assert marker.is_file()
 
@@ -263,7 +269,7 @@ def test_committed_recovery_keeps_reader_closed_if_saved_snapshot_is_corrupt(nat
     child.join(10)
     assert child.exitcode == 83
     (config.export / "cookies.txt").write_text("corrupt synthetic snapshot")
-    with lease(config.root), pytest.raises(ValueError, match="cannot be verified"):
+    with lease(config.root), pytest.raises(ValueError, match="recovery_required"):
         promotion.recover()
     assert publication_pending(control, "main") and promotion.journal.is_file()
 
@@ -468,3 +474,244 @@ def test_routing_namespaces_cannot_collide_and_kept_default_never_hands_over_a_s
     for invalid in ("m_" + "a" * 14, "unknown-namespace-000000", "../untrusted"):
         with pytest.raises(LoginUnavailable):
             routed.state(invalid)
+
+
+@pytest.mark.parametrize("outcome", ["cancel", "error", "wrong_account"])
+def test_failed_native_reconnect_leaves_keeper_and_agents_refused(native, monkeypatch, outcome):
+    from photos_maintenance.cli import build_keeper
+    from photos_maintenance.outcomes import IdentityOutcome
+
+    config, control, promotion = native
+    control.set_control("main", 1)
+    original = accepted_bytes(promotion)
+
+    def abandoned(**kwargs):
+        if outcome == "cancel":
+            raise window.Cancelled()
+        if outcome == "error":
+            raise RuntimeError("synthetic interruption")
+        result = verifier(**kwargs)
+        snapshot(kwargs["session_dir"], 8, "other@example.com")
+        return result
+
+    login = Login(config)
+    DefaultSignIn(config, sign_in=abandoned, require_policy=False)(login)
+    assert login.state != "connected"
+    assert control.control("main")[1] == 1
+    assert accepted_bytes(promotion) == original
+    with pytest.raises(PhotosError, match="connection_disconnected"), ConnectionAdmission(control).operation("main"):
+        pass
+    monkeypatch.setenv("PHOTOS_CONNECTIONS_CONTROLS_DIR", str(config.controls))
+    monkeypatch.setenv("PHOTOS_CONNECTIONS_ACCOUNT", "main")
+    keeper = build_keeper(config.root, config.export, config.expected_email, "")
+    monkeypatch.setattr(keeper, "_open_browser", lambda: pytest.fail("disconnected keeper opened a browser"))
+    assert keeper.run(allow_credential_mint=True).outcome == IdentityOutcome.DISCONNECTED
+
+
+@pytest.mark.parametrize("journal", [False, True])
+def test_mismatch_is_held_until_leased_quarantine_and_fresh_verification(native, monkeypatch, capsys, journal):
+    from test_deployment import provision
+
+    from photos_maintenance.cli import build_keeper, main
+    from photos_maintenance.outcomes import IdentityOutcome
+    from photos_mcp.connection_controls import pending_path, recovery_path
+
+    config, control, promotion = native
+    provision(config.root, "maintenance")
+    if journal:
+        child = multiprocessing.get_context("fork").Process(target=crash_commit, args=(config, "meta.json"))
+        child.start()
+        child.join(10)
+        assert child.exitcode == 83
+    marker = pending_path(control, "main")
+    atomic_private_write(marker, b'{"id":"mismatch","phase":"prepared"}')
+    evidence = marker.read_bytes()
+    monkeypatch.setenv("PHOTOS_CONNECTIONS_CONTROLS_DIR", str(config.controls))
+    monkeypatch.setenv("PHOTOS_CONNECTIONS_ACCOUNT", "main")
+    keeper = build_keeper(config.root, config.export, config.expected_email, "")
+    monkeypatch.setattr(keeper, "_open_browser", lambda: pytest.fail("recovery opened a browser"))
+    result = keeper.run(allow_credential_mint=True)
+    assert result.outcome == IdentityOutcome.RECOVERY_REQUIRED
+    assert result.needs_attention and result.exit_code == 1
+    assert marker.read_bytes() == evidence
+    assert recovery_path(control, "main").exists()
+    before = control.control("main")[0]
+    assert main(["recover-publication", "--root", str(config.root), "--export-dir", str(config.export)]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "disconnected"
+    assert control.control("main")[0] != before and control.control("main")[1] == 1
+    quarantines = list((config.root / "publication-quarantine").iterdir())
+    assert len(quarantines) == 1
+    assert (quarantines[0] / "pending.json").read_bytes() == evidence
+    assert (quarantines[0] / "human-recovery" / "commit.json").exists() == journal
+    assert not publication_pending(control, "main")
+    with pytest.raises(PhotosError, match="connection_disconnected"), ConnectionAdmission(control).operation("main"):
+        pass
+    assert keeper.run(allow_credential_mint=True).outcome == IdentityOutcome.DISCONNECTED
+    # Repair accepts no credentials; a new current owner attempt must verify.
+    control.set_control("main", 1)
+    login = Login(config)
+    DefaultSignIn(config, sign_in=verifier, require_policy=False)(login)
+    assert login.state == "connected" and control.control("main")[1] == 0
+
+
+def test_recovery_quarantine_failure_keeps_access_closed_and_evidence(native, monkeypatch):
+    from photos_maintenance.human_state import quarantine_publication
+    from photos_mcp.connection_controls import pending_path
+
+    config, control, _ = native
+    marker = pending_path(control, "main")
+    atomic_private_write(marker, b'{"id":"mismatch"}')
+    real_write = atomic_private_write
+
+    def fail_copy(path, payload):
+        if "publication-quarantine" in str(path):
+            raise OSError("synthetic storage failure")
+        return real_write(path, payload)
+
+    monkeypatch.setattr("photos_maintenance.human_state.atomic_private_write", fail_copy)
+    with pytest.raises(OSError):
+        quarantine_publication(config.root, config.export, config.guard())
+    assert control.control("main")[1] == 2 and marker.exists()
+    with pytest.raises(PhotosError, match="connection_disconnected"), ConnectionAdmission(control).operation("main"):
+        pass
+    monkeypatch.setattr("photos_maintenance.human_state.atomic_private_write", real_write)
+    quarantine_publication(config.root, config.export, config.guard())
+    assert control.control("main")[1] == 1
+
+
+@pytest.mark.parametrize("timing", ["before", "after"])
+@pytest.mark.parametrize(
+    "point",
+    [
+        "copy_pending",
+        "copy_recovery",
+        "rename",
+        "sync_destination",
+        "sync_root",
+        "unlink_pending",
+        "sync_pending",
+        "unlink_recovery",
+        "sync_recovery",
+        "suspend",
+    ],
+)
+def test_interrupted_quarantine_never_reconciles_or_erases_held_journal(native, monkeypatch, point, timing):
+    from pathlib import Path
+
+    from photos_maintenance import human_state
+    from photos_maintenance.cli import build_keeper
+    from photos_maintenance.human_state import RecoveryRequired, quarantine_publication
+    from photos_maintenance.outcomes import IdentityOutcome
+    from photos_mcp.connection_controls import pending_path, recovery_path
+
+    config, control, promotion = native
+    child = multiprocessing.get_context("fork").Process(target=crash_commit, args=(config, "committed"))
+    child.start()
+    child.join(10)
+    assert child.exitcode == 83
+    marker = pending_path(control, "main")
+    atomic_private_write(marker, b'{"id":"mismatch","phase":"prepared"}')
+    with lease(config.root), pytest.raises(RecoveryRequired):
+        promotion.recover()
+    journal = promotion.journal.read_bytes()
+    pending = marker.read_bytes()
+    recovery = recovery_path(control, "main")
+    held = recovery.read_bytes()
+    accounting = promotion.target.read_bytes()
+    ledger = (config.root / "session-keeper" / "google.json").read_bytes()
+    evidence = {p.relative_to(promotion.work): p.read_bytes() for p in promotion.work.rglob("*") if p.is_file()}
+    original_rename = Path.rename
+    original_unlink = Path.unlink
+    original_sync = human_state.fsync_directory
+    original_control = BrowserStore.set_control
+    injected = []
+
+    def interrupt(event, call):
+        if event == point and timing == "before":
+            injected.append(event)
+            raise OSError("synthetic quarantine interruption")
+        result = call()
+        if event == point and timing == "after":
+            injected.append(event)
+            raise OSError("synthetic quarantine interruption")
+        return result
+
+    def write(path, payload):
+        event = {"pending.json": "copy_pending", "recovery-required": "copy_recovery"}.get(path.name)
+        return interrupt(event, lambda: atomic_private_write(path, payload))
+
+    def move(path, target):
+        return interrupt("rename" if path == promotion.work else None, lambda: original_rename(path, target))
+
+    def unlink(path, *args, **kwargs):
+        event = "unlink_pending" if path == marker else "unlink_recovery" if path == recovery else None
+        return interrupt(event, lambda: original_unlink(path, *args, **kwargs))
+
+    def sync(path):
+        event = None
+        if (path / "human-recovery").is_dir():
+            event = "sync_destination"
+        elif path == config.root and not promotion.work.exists():
+            event = "sync_root"
+        elif path == marker.parent and not marker.exists():
+            event = "sync_pending" if recovery.exists() else "sync_recovery"
+        return interrupt(event, lambda: original_sync(path))
+
+    def set_control(store, account, suspended):
+        return interrupt("suspend" if suspended == 1 else None, lambda: original_control(store, account, suspended))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(human_state, "atomic_private_write", write)
+        patch.setattr(human_state, "fsync_directory", sync)
+        patch.setattr(Path, "rename", move)
+        patch.setattr(Path, "unlink", unlink)
+        patch.setattr(BrowserStore, "set_control", set_control)
+        with pytest.raises(OSError, match="quarantine interruption"):
+            quarantine_publication(config.root, config.export, config.guard())
+    assert injected == [point]
+    assert control.control("main")[1] == (1 if (point, timing) == ("suspend", "after") else 2)
+    if recovery.exists():
+        with lease(config.root), pytest.raises(RecoveryRequired):
+            promotion.recover()
+    else:
+        with lease(config.root):
+            promotion.recover()
+        assert not promotion.work.exists()
+    monkeypatch.setenv("PHOTOS_CONNECTIONS_CONTROLS_DIR", str(config.controls))
+    monkeypatch.setenv("PHOTOS_CONNECTIONS_ACCOUNT", "main")
+    keeper = build_keeper(config.root, config.export, config.expected_email, "")
+    monkeypatch.setattr(keeper, "_open_browser", lambda: pytest.fail("repair recovery opened a browser"))
+    expected = IdentityOutcome.RECOVERY_REQUIRED if recovery.exists() else IdentityOutcome.DISCONNECTED
+    assert keeper.run(allow_credential_mint=True).outcome == expected
+    quarantine = config.root / "publication-quarantine"
+    for relative, payload in evidence.items():
+        copies = [promotion.work / relative, *quarantine.glob("*/human-recovery/" + relative.as_posix())]
+        assert any(copy.is_file() and copy.read_bytes() == payload for copy in copies)
+    assert any(copy.read_bytes() == pending for copy in quarantine.glob("*/pending.json")) or marker.exists()
+    assert any(copy.read_bytes() == held for copy in quarantine.glob("*/recovery-required")) or recovery.exists()
+    assert promotion.target.read_bytes() == accounting
+    assert (config.root / "session-keeper" / "google.json").read_bytes() == ledger
+    quarantine_publication(config.root, config.export, config.guard())
+    assert control.control("main")[1] == 1
+    assert not promotion.journal.exists()
+    assert not marker.exists() and not recovery.exists()
+    saved = list(quarantine.glob("*/human-recovery/commit.json"))
+    assert len(saved) == 1 and saved[0].read_bytes() == journal
+
+
+@pytest.mark.parametrize("point", ["prepared", "profile", "meta.json", "accounting", "committed"])
+def test_crashed_native_reconnect_cannot_activate_from_journal_alone(native, point):
+    config, control, promotion = native
+    control.set_control("main", 1)
+    epoch = control.control("main")[0]
+    child = multiprocessing.get_context("fork").Process(target=crash_commit, args=(config, point))
+    child.start()
+    child.join(10)
+    assert child.exitcode == 83
+    # Even the committed filesystem journal precedes the SQLite authority commit.
+    assert control.control("main") == (epoch, 1)
+    with lease(config.root):
+        promotion.recover()
+    assert control.control("main") == (epoch, 1)
+    with pytest.raises(PhotosError, match="connection_disconnected"), ConnectionAdmission(control).operation("main"):
+        pass

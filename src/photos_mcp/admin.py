@@ -10,14 +10,13 @@ change on its next call.
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from typing import Any
 
 from . import accounts
-from .config import ConfigError, Settings
+from .config import ConfigError, Settings, StartupConfigError
 from .login_client import LoginClient, LoginUnavailable
+from .logs import SafeParser, diagnostic, setup
 
 
 def _list(settings: Settings) -> list[dict[str, Any]]:
@@ -48,7 +47,8 @@ def _list(settings: Settings) -> list[dict[str, Any]]:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="photos-mcp admin", description="Accounts on this server.")
+    setup()
+    parser = SafeParser(prog="photos-mcp admin", description="Accounts on this server.")
     groups = parser.add_subparsers(dest="group", required=True)
     account = groups.add_parser("account", help="the further accounts beside the default one").add_subparsers(
         dest="action", required=True
@@ -89,15 +89,26 @@ def main(argv: list[str]) -> int:
                 LoginClient(settings.login_url, settings.login_token).forget(args.id)
             accounts.remove(settings, args.id)
             result = {"removed": args.id}
-    except (ConfigError, accounts.AccountConfigError) as exc:
-        print("photos-mcp admin:", *exc.args, file=sys.stderr)
+    except StartupConfigError as error:
+        diagnostic(f"photos-mcp admin: {error}")
+        return 1
+    except ConfigError:
+        diagnostic("photos-mcp admin: server configuration invalid; check PHOTOS_* settings")
+        return 1
+    except accounts.AccountConfigError:
+        diagnostic(
+            "photos-mcp admin: account configuration rejected; check the account ID, address "
+            "and whether budget shares exceed server limits"
+        )
         return 1
     except LoginUnavailable:
-        print(
+        diagnostic(
             "photos-mcp admin: the login service did not delete the account's browser profile and snapshot; "
-            "nothing was changed. Start it and try again.",
-            file=sys.stderr,
+            "nothing was changed. Start it and try again."
         )
+        return 1
+    except Exception:
+        diagnostic("photos-mcp admin: account operation failed; inspect server configuration and private state")
         return 1
     print(json.dumps(result, indent=2))
     return 0

@@ -8,7 +8,6 @@ cancelling existing work. Process death releases leases, never the durable hold.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import fcntl
@@ -22,6 +21,8 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from signin_window.state import atomic_private_write
+
+from .logs import SafeParser, diagnostic, setup
 
 ROOTS = {"reader": "/state", "login": "/profiles", "maintenance": "/maintenance"}
 
@@ -410,7 +411,8 @@ def guarded_windows(windows, gate):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    setup()
+    parser = SafeParser(description=__doc__)
     parser.add_argument("scope", choices=ROOTS)
     parser.add_argument("action", choices=("status", "hold", "drain", "release"))
     parser.add_argument("--operation", default="")
@@ -431,7 +433,7 @@ def main():
         print(json.dumps(result))
         return 0
     except (Busy, ValueError, OSError, KeyError, TypeError):
-        print("Deployment hold unresolved; preserve original work", file=__import__("sys").stderr)
+        diagnostic("Deployment hold unresolved; preserve original work")
         return 73
 
 

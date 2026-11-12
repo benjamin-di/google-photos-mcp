@@ -1,5 +1,7 @@
 """Bearer auth through the real HTTP app (same options main() serves with); /health is open."""
 
+import json
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -52,7 +54,12 @@ def test_serving_http_without_a_token_refuses(monkeypatch, capsys):
     monkeypatch.setenv("GOOGLE_PHOTOS_EXPECTED_EMAIL", "owner@example.com")
     with pytest.raises(SystemExit) as caught:
         server.main([])
-    assert caught.value.code == 1 and "MCP_BEARER_TOKEN" in capsys.readouterr().err
+    event = json.loads(capsys.readouterr().err)
+    assert (
+        caught.value.code == 1
+        and event["msg"] == "MCP_BEARER_TOKEN must be set to serve over HTTP (comma-separated for several tokens)"
+    )
+    assert event["service"] == "photos-mcp" and event["instance"]
 
 
 def test_bad_configuration_exits_before_serving(monkeypatch, capsys):
@@ -62,7 +69,12 @@ def test_bad_configuration_exits_before_serving(monkeypatch, capsys):
     for transport in ("http", "stdio"):
         with pytest.raises(SystemExit) as caught:
             server.main(["--transport", transport])
-        assert caught.value.code == 1 and "PHOTOS_BUDGET_TZ" in capsys.readouterr().err
+        event = json.loads(capsys.readouterr().err)
+        assert (
+            caught.value.code == 1
+            and event["msg"] == "PHOTOS_BUDGET_TZ must be an IANA time zone name such as Europe/Paris"
+        )
+        assert "Mars/Olympus_Mons" not in json.dumps(event)
 
 
 def test_main_requires_the_expected_email(monkeypatch):

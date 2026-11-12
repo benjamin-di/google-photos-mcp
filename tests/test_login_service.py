@@ -478,3 +478,82 @@ def test_the_window_is_a_kiosk():
     source = inspect.getsource(window.sign_in)
     assert "harden_sync(context)" in source and "top_level(request)" in source
     assert "harden_sync" not in inspect.getsource(window.refresh)  # nobody watches a refresh
+
+
+@pytest.mark.parametrize("suspended", [1, 2])
+def test_keeper_skips_suspended_controls_without_opening_browser(paths, tmp_path, suspended):
+    from photos_mcp.connections_auth import BrowserStore
+
+    clock = Clock()
+    kept_account(paths, clock)
+    controls = BrowserStore(tmp_path / "controls")
+    controls.set_control("second", suspended)
+    before = paths.keeper("second")
+    keeper = Keeper(
+        paths,
+        threading.Lock(),
+        controls=controls,
+        clock=clock,
+        refresher=lambda **kw: pytest.fail("suspended keeper opened browser"),
+    )
+    assert keeper.refresh_one("second") is None
+    assert paths.keeper("second") == before
+
+
+def test_forget_after_refresh_lock_release_cannot_recreate_keeper_state(paths):
+    clock = Clock()
+    kept_account(paths, clock)
+
+    class ForgetOnRelease:
+        def acquire(self, timeout):
+            return True
+
+        def release(self):
+            paths.forget("second")
+
+    keeper = Keeper(paths, ForgetOnRelease(), clock=clock, refresher=lambda **kw: snapshot(paths, "second", 4))
+    assert keeper.refresh_one("second") == SIGNED_IN
+    # The old success-after-release path recreated keeper.json after forget.
+    assert not paths.session("second").exists()
+    assert not paths.profile("second").exists()
+
+
+def test_keeper_rereads_account_after_waiting_for_forget(paths):
+    clock = Clock()
+    kept_account(paths, clock)
+
+    class ForgetBeforeAcquire:
+        def acquire(self, timeout):
+            paths.forget("second")
+            return True
+
+        def release(self):
+            pass
+
+    keeper = Keeper(
+        paths,
+        ForgetBeforeAcquire(),
+        clock=clock,
+        refresher=lambda **kw: pytest.fail("keeper resurrected a forgotten account"),
+    )
+    assert keeper.refresh_one("second") is None
+    assert not paths.session("second").exists()
+
+
+def test_disconnect_during_refresh_cannot_record_signed_in(paths, tmp_path):
+    from photos_mcp.connections_auth import BrowserStore
+
+    clock = Clock()
+    kept_account(paths, clock)
+    controls = BrowserStore(tmp_path / "controls")
+    controls.set_control("second", 0)
+    original = paths.keeper("second")
+
+    def refresher(**kw):
+        controls.set_control("second", 2)
+        return snapshot(paths, "second", 4)
+
+    keeper = Keeper(paths, threading.Lock(), controls=controls, clock=clock, refresher=refresher)
+    assert keeper.refresh_one("second") is None
+    assert paths.keeper("second") == original
+    assert controls.control("second")[1] == 2

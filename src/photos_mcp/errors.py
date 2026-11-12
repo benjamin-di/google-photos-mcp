@@ -1,4 +1,4 @@
-"""The error taxonomy (README "Errors"). Tools report ``{code, next_step, retryable}`` and nothing else.
+"""The error taxonomy (README "Errors"). Removal errors can also carry mutation evidence.
 
 Exception text never reaches a tool result: every message a model sees comes from the
 fixed ``NEXT_STEP`` table below (plus, for ``invalid_argument``, our own validation text).
@@ -44,6 +44,10 @@ NEXT_STEP: dict[str, str] = {
         "zone (photos_status: budgets.resets_at)."
     ),
     "busy": "Another request to Google is still running. Retry in a few seconds.",
+    "connection_changed": (
+        "The captured connection is unavailable, changed, or does not support conditional operations. "
+        "Keep the captured items and inspect the original connection; do not substitute a new binding."
+    ),
     "upstream_error": "Google or the network failed after retries. Retry in a minute.",
     "invalid_argument": "Fix the arguments and call again.",
     "invalid_cursor": (
@@ -103,12 +107,30 @@ class PhotosError(Exception):
         self.code = code
         self.detail = detail  # only for invalid_argument: our own validation text
         self.log_detail = log_detail
+        self.mutation: dict[str, Any] | None = None
+
+    def at_mutation(self, phase: str) -> PhotosError:
+        """Clone with evidence from the tracked operation, never from the error code alone."""
+        if phase not in {"before_write", "write_attempted", "read_back"}:
+            raise ValueError("Invalid mutation phase")
+        error = PhotosError(self.code, self.detail, log_detail=self.log_detail)
+        error.mutation = {"phase": phase, "definitely_unsent": phase == "before_write"}
+        return error
 
     def payload(self) -> dict[str, Any]:
         next_step = NEXT_STEP[self.code]
         if self.code == "invalid_argument" and self.detail:
             next_step = f"{self.detail}. {next_step}"
-        return {"code": self.code, "next_step": next_step, "retryable": self.code in RETRYABLE}
+        result = {"code": self.code, "next_step": next_step, "retryable": self.code in RETRYABLE}
+        if self.mutation is not None:
+            result["mutation"] = dict(self.mutation)
+            if not self.mutation["definitely_unsent"]:
+                result["retryable"] = False
+                result["next_step"] = (
+                    "The change may have applied. Do not repeat it automatically. Observe the exact items "
+                    "under the original connection; an unavailable or incomplete listing proves nothing."
+                )
+        return result
 
 
 def invalid(detail: str) -> PhotosError:

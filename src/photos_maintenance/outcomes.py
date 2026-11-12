@@ -12,6 +12,8 @@ class IdentityOutcome(StrEnum):
     PUBLISHED = "published"
     #: The connection owner deliberately suspended access; no sign-in is attempted.
     DISCONNECTED = "disconnected"
+    #: Local publication evidence is inconsistent; explicit leased repair is required.
+    RECOVERY_REQUIRED = "recovery_required"
     #: Another run holds the profile lease; nothing was attempted.
     SKIPPED_LEASE_BUSY = "skipped_lease_busy"
     #: An earlier ``blocked`` cooldown is still running; nothing was attempted.

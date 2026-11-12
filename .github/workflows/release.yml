@@ -87,6 +87,9 @@ jobs:
             --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" .
           candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er .digest)"
           bash scripts/check-image-labels.sh "$IMAGE@$candidate_digest" "https://github.com/$GITHUB_REPOSITORY" "$GITHUB_SHA" "$version"
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            --mount "type=bind,src=$PWD/scripts/check-build-identity.py,dst=/tmp/check-build-identity.py,readonly" \
+            --entrypoint python "$IMAGE@$candidate_digest" /tmp/check-build-identity.py "$version" "$GITHUB_SHA"
           # Smoke: HTTP refuses to start without a bearer; stdio answers initialize.
           rc=0
           docker run --rm --network none -e GOOGLE_PHOTOS_EXPECTED_EMAIL=smoke@example.com "$candidate" || rc=$?
@@ -132,6 +135,9 @@ jobs:
           candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er .digest)"
           bash scripts/check-image-labels.sh "$IMAGE@$candidate_digest" "https://github.com/$GITHUB_REPOSITORY" "$GITHUB_SHA" "$version"
           docker pull -q "$candidate" >/dev/null
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            --mount "type=bind,src=$PWD/scripts/check-build-identity.py,dst=/tmp/check-build-identity.py,readonly" \
+            --entrypoint python "$IMAGE@$candidate_digest" /tmp/check-build-identity.py "$version" "$GITHUB_SHA"
           # Smoke: everything the windows need is there, it refuses to start without its bearer, never as root.
           docker run --rm --network none --entrypoint sh "$candidate" -c '
             set -e

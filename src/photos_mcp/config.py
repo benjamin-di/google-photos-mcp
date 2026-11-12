@@ -15,6 +15,10 @@ class ConfigError(Exception):
     """Bad or missing configuration; raised at startup only."""
 
 
+class StartupConfigError(ConfigError):
+    """Fixed configuration guidance without rejected input values."""
+
+
 # Path-safe by construction: lower-case letters, digits and dashes, never "." or "/" or empty.
 ACCOUNT_ID = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
@@ -61,7 +65,7 @@ class Settings:
         env = os.environ if env is None else env
         email = (env.get("GOOGLE_PHOTOS_EXPECTED_EMAIL") or "").strip().lower()
         if "@" not in email:
-            raise ConfigError("GOOGLE_PHOTOS_EXPECTED_EMAIL must name the Google account to serve")
+            raise StartupConfigError("GOOGLE_PHOTOS_EXPECTED_EMAIL must name the Google account to serve")
         return cls(
             expected_email=email,
             session_dir=Path((env.get("PHOTOS_SESSION_DIR") or "").strip() or "/session"),
@@ -85,7 +89,7 @@ class Settings:
 def _account(env: Mapping[str, str]) -> str:
     raw = (env.get("PHOTOS_DEFAULT_ACCOUNT") or "").strip() or "default"
     if not ACCOUNT_ID.match(raw):
-        raise ConfigError("PHOTOS_DEFAULT_ACCOUNT must be 1-32 lower-case letters, digits or dashes")
+        raise StartupConfigError("PHOTOS_DEFAULT_ACCOUNT must be 1-32 lower-case letters, digits or dashes")
     return raw
 
 
@@ -94,7 +98,7 @@ def _header(env: Mapping[str, str]) -> str | None:
     if not raw:
         return None
     if not HEADER_NAME.match(raw):
-        raise ConfigError("PHOTOS_TRUSTED_ACCOUNT_HEADER must be an HTTP header name such as X-Account")
+        raise StartupConfigError("PHOTOS_TRUSTED_ACCOUNT_HEADER must be an HTTP header name such as X-Account")
     return raw
 
 
@@ -104,14 +108,14 @@ def _login_url(env: Mapping[str, str], name: str = "PHOTOS_LOGIN_URL") -> str | 
     if not raw:
         return None
     if not re.fullmatch(r"http://[a-z0-9][a-z0-9.-]{0,62}:[0-9]{2,5}", raw):
-        raise ConfigError(f"{name} must look like http://photos-mcp-login:8080")
+        raise StartupConfigError(f"{name} must look like http://photos-mcp-login:8080")
     return raw
 
 
 def _login_token(env: Mapping[str, str]) -> str | None:
     raw = (env.get("PHOTOS_LOGIN_TOKEN") or "").strip()
     if (env.get("PHOTOS_LOGIN_URL") or "").strip() and len(raw) < 32:
-        raise ConfigError("PHOTOS_LOGIN_URL needs PHOTOS_LOGIN_TOKEN (32 or more characters)")
+        raise StartupConfigError("PHOTOS_LOGIN_URL needs PHOTOS_LOGIN_TOKEN (32 or more characters)")
     return raw or None
 
 
@@ -126,7 +130,7 @@ def _public_url(env: Mapping[str, str]) -> str | None:
         r"(/[A-Za-z0-9._~-]+){0,8}",
         raw,
     ):
-        raise ConfigError("PHOTOS_PUBLIC_URL must look like https://example.com/photos (no query or fragment)")
+        raise StartupConfigError("PHOTOS_PUBLIC_URL must look like https://example.com/photos (no query or fragment)")
     return raw
 
 
@@ -137,9 +141,9 @@ def _int(env: Mapping[str, str], name: str, default: int, minimum: int, maximum:
     try:
         value = int(raw)
     except ValueError:
-        raise ConfigError(f"{name} must be an integer") from None
+        raise StartupConfigError(f"{name} must be an integer") from None
     if not minimum <= value <= maximum:
-        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+        raise StartupConfigError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 
@@ -150,4 +154,4 @@ def _zone(env: Mapping[str, str], name: str) -> tzinfo:
     try:
         return ZoneInfo(raw)
     except (ZoneInfoNotFoundError, ValueError):
-        raise ConfigError(f"{name} must be an IANA time zone name such as Europe/Paris") from None
+        raise StartupConfigError(f"{name} must be an IANA time zone name such as Europe/Paris") from None

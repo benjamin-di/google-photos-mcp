@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from threading import Event
 
 import pytest
 from signin_window import relay as relay_module
@@ -285,11 +286,13 @@ def test_a_sign_in_binds_the_links_account_to_the_address_it_proved(http, login,
     assert http.post(path + "/start", json={"layout": "phone"}).json()["state"] in {"starting", "waiting"}
     # The login service is told which address it may accept: any but the ones other accounts serve.
     assert login.started == [{"account": "second", "layout": "phone", "email": None, "taken": ["owner@example.com"]}]
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "waiting")
     assert http.get(path + "/state").json() == {"state": "waiting", "host": "accounts.google.com"}
     login.end("login-00000000000", "saving")
-    assert http.get(path + "/state").json()["state"] == "saving"
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "saving")
     publish(settings, "second", OTHER)  # the login service writes the snapshot itself
     login.end("login-00000000000", "connected", OTHER)
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "connected")
     done = http.get(path + "/state").json()
     assert done == {"state": "connected", "host": "photos.google.com", "email": "s•••@example.com"}
     assert accounts.load(settings, "second").email == OTHER
@@ -305,24 +308,63 @@ def test_a_sign_in_binds_the_links_account_to_the_address_it_proved(http, login,
     assert login.started[-1]["email"] == OTHER
 
 
+@pytest.mark.parametrize("poll_in_flight", [False, True])
 @pytest.mark.parametrize(
     ("ending", "shown"),
     [("wrong_account", "wrong_account"), ("in_use", "in_use"), ("empty_library", "empty_library"),
      ("failed", "failed"), ("cancelled", "cancelled"), ("expired", "failed")],  # a window past its time: try again
 )  # fmt: skip
-def test_a_refused_or_failed_sign_in_binds_nothing(http, login, settings, ending, shown):
+def test_a_refused_or_failed_sign_in_binds_nothing(http, login, settings, monkeypatch, ending, shown, poll_in_flight):
+    polling, resume = Event(), Event()
+    if poll_in_flight:
+        original_state = login.state
+
+        def state(login_id):
+            polling.set()
+            assert resume.wait(5), "test did not release the backend poll"
+            return original_state(login_id)
+
+        monkeypatch.setattr(login, "state", state)
     path = link_path(owner_window(http))
-    http.post(path + "/start", json={})
-    login.end("login-00000000000", ending)
-    assert http.get(path + "/state").json()["state"] == shown
+    try:
+        http.post(path + "/start", json={})
+        if poll_in_flight:
+            assert polling.wait(5), "the relay did not poll the backend"
+        login.end("login-00000000000", ending)
+        if poll_in_flight:
+            assert http.get(path + "/state").json()["state"] in {"starting", "waiting"}
+            assert accounts.load(settings, "second").email is None
+    finally:
+        resume.set()
+    wait_for(lambda: http.get(path + "/state").json()["state"] == shown)
     assert accounts.load(settings, "second").email is None
 
 
-def test_an_unknown_ending_is_a_failure(http, login):
+@pytest.mark.parametrize("poll_in_flight", [False, True])
+def test_an_unknown_ending_is_a_failure(http, login, settings, monkeypatch, poll_in_flight):
+    polling, resume = Event(), Event()
+    if poll_in_flight:
+        original_state = login.state
+
+        def state(login_id):
+            polling.set()
+            assert resume.wait(5), "test did not release the backend poll"
+            return original_state(login_id)
+
+        monkeypatch.setattr(login, "state", state)
     path = link_path(owner_window(http))
-    http.post(path + "/start", json={})
-    login.states.clear()  # the login service forgot the window (restarted)
-    assert http.get(path + "/state").json()["state"] == "failed"
+    try:
+        http.post(path + "/start", json={})
+        if poll_in_flight:
+            assert polling.wait(5), "the relay did not poll the backend"
+        login.states.clear()  # the login service forgot the window (restarted)
+        if poll_in_flight:
+            # A status request skips advancement while the follower owns the link.
+            assert http.get(path + "/state").json()["state"] in {"starting", "waiting"}
+    finally:
+        resume.set()
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "failed")
+    assert accounts.load(settings, "second").email is None
 
 
 def test_losing_the_binding_race_withdraws_the_new_sign_in(http, login, settings):
@@ -331,7 +373,7 @@ def test_losing_the_binding_race_withdraws_the_new_sign_in(http, login, settings
     http.post(path + "/start", json={})
     accounts.bind_email(settings, "third", OTHER)  # bound meanwhile, after the login service checked
     login.end("login-00000000000", "connected", OTHER)
-    assert http.get(path + "/state").json()["state"] == "in_use"
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "in_use")
     assert accounts.load(settings, "second").email is None and login.forgotten == ["second"]
 
 
@@ -339,7 +381,7 @@ def test_closing_the_page_while_saving_keeps_the_sign_in(http, login, settings):
     path = link_path(owner_window(http))
     http.post(path + "/start", json={})
     login.end("login-00000000000", "saving")
-    assert http.get(path + "/state").json()["state"] == "saving"
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "saving")
     assert http.post(path + "/cancel").status_code == 204
     assert login.closed == [] and http.get(path + "/state").json()["state"] == "saving"
 
@@ -380,7 +422,7 @@ def test_the_live_view_needs_an_open_window(http):
     with pytest.raises(WebSocketDisconnect), http.websocket_connect(path + "/vnc") as ws:
         ws.receive_bytes()
     http.post(path + "/start", json={})
-    http.get(path + "/state")
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "waiting")
     with http.websocket_connect(path + "/vnc", subprotocols=["binary"]) as ws:
         assert ws.receive_bytes() == b"RFB 003.008\n"
 
@@ -391,7 +433,7 @@ def test_the_live_view_ends_with_the_sign_in_page(http, login):
     path = link_path(owner_window(http))
     http.post(path + "/start", json={})
     login.end("login-00000000000", "saving")
-    http.get(path + "/state")
+    wait_for(lambda: http.get(path + "/state").json()["state"] == "saving")
     with pytest.raises(WebSocketDisconnect), http.websocket_connect(path + "/vnc") as ws:
         ws.receive_bytes()
 

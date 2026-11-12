@@ -10,7 +10,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 from test_accounts import make_settings
-from test_connect import FakeLogin, owner_post
+from test_connect import FakeLogin, owner_post, wait_for
 
 from photos_mcp import accounts
 from photos_mcp.config import ConfigError
@@ -159,7 +159,7 @@ def test_disconnect_barrier_survives_restart_and_fences_old_completion(system):
     assert owner_post(client, "/connections/disconnect", headers={"origin": "https://example.com"}).status_code == 303
     assert client.get("/connections/status").json()["state"] == "disconnected"
     start(client)
-    assert portal.account_allowed("first")
+    assert not portal.account_allowed("first")
 
 
 def test_auth_config_and_return_destinations_fail_closed(system):
@@ -297,6 +297,13 @@ def test_default_owner_can_reconnect_without_changing_native_identity_or_storage
         assert backend.started[-1]["email"] == settings.expected_email
         assert settings.expected_email not in backend.started[-1]["taken"]
         link = next(iter(managed.flow.relay._links.values()))
+        # A relay response cannot activate the retained native account.
+        assert managed.flow._bind(link, settings.expected_email) == "failed"
+        from photos_mcp.connection_controls import PublicationGuard
+
+        epoch = managed.auth.store.control(settings.default_account)[0]
+        with PublicationGuard(managed.auth.store, settings.default_account).snapshot(epoch, activate=True):
+            pass  # native promotion itself is covered by test_default_recovery
         assert managed.flow._bind(link, settings.expected_email) == "connected"
         assert managed.flow._bind(link, "different@example.com") == "in_use"
         assert (
@@ -305,7 +312,7 @@ def test_default_owner_can_reconnect_without_changing_native_identity_or_storage
         assert not managed.account_allowed(settings.default_account)
         assert "browser profile is kept" in browser.get("/connections/").text
         assert owner_post(browser, "/connections/start", headers={"origin": "https://example.com"}).status_code == 303
-        assert managed.account_allowed(settings.default_account)
+        assert not managed.account_allowed(settings.default_account)
         assert (settings.session_dir / "meta.json").exists()
         assert not accounts.load(settings, settings.default_account).linked
         assert not (settings.state_dir / "accounts" / settings.default_account).exists()
@@ -418,7 +425,7 @@ def test_concurrent_disconnect_cannot_delete_a_newer_owner_attempt(system):
             release.set()
         assert first.result(timeout=5).status_code == 303
     start(client)
-    assert portal.auth.store.control("first")[1] == 0
+    assert portal.auth.store.control("first")[1] == 1
     assert backend.forgotten == ["first"]
 
 
@@ -614,3 +621,101 @@ def test_required_reader_cannot_ignore_replacement_of_the_whole_state_root(tmp_p
     monkeypatch.setenv("CONNECTIONS_REQUIRE_CONTROLS", "1")
     with pytest.raises(ConfigError, match="durable connection controls"):
         Accounts(object(), Settings(expected_email="owner@example.com", state_dir=tmp_path / "new-state"))
+
+
+@pytest.mark.parametrize("ending", ["cancelled", "expired", "failed"])
+def test_abandoned_reconnect_keeps_saved_credentials_refused(system, ending):
+    from test_accounts import publish
+
+    from photos_mcp.errors import PhotosError
+    from photos_mcp.server import Accounts, create_server
+
+    portal, provider, backend, client, settings = system
+    publish(settings, "first", "first@example.com")
+    accounts.bind_email(settings, "first", "first@example.com")
+    assert sign_in(portal, provider, client).status_code == 303
+    assert owner_post(client, "/connections/disconnect", headers={"origin": "https://example.com"}).status_code == 303
+    previous = portal.auth.store.control("first")[0]
+    url = start(client)
+    epoch, suspended = portal.auth.store.control("first")
+    assert epoch != previous and suspended == 1
+    assert client.get("/connections/status").json()["state"] == "connecting"
+    assert client.post(url + "/start", headers={"origin": "https://example.com"}).status_code == 200
+    attempt = next(link for link in portal.flow.relay.links("first") if link.url.endswith(url))
+    backend.end(attempt.window_id, ending)
+    wait_for(lambda: client.get(url + "/state").json()["state"] not in ("starting", "waiting", "saving"))
+    assert portal.auth.store.control("first") == (epoch, 1)
+    assert not portal.account_allowed("first")
+    registry = Accounts.from_settings(settings, login=backend)
+    create_server(registry, connections=portal.config)
+    with pytest.raises(PhotosError, match="connection_disconnected"):
+        registry.get("first")
+
+
+def test_verified_further_account_result_activates_only_its_current_epoch(system):
+    portal, provider, backend, client, settings = system
+    assert sign_in(portal, provider, client).status_code == 303
+    url = start(client)
+    epoch = portal.auth.store.control("first")[0]
+    assert not portal.account_allowed("first")
+    assert client.post(url + "/start", headers={"origin": "https://example.com"}).status_code == 200
+    attempt = next(link for link in portal.flow.relay.links("first") if link.url.endswith(url))
+    backend.end(attempt.window_id, "connected", "first@example.com")
+    wait_for(lambda: client.get(url + "/state").json()["state"] == "connected")
+    assert portal.auth.store.control("first") == (epoch, 0)
+    assert portal.account_allowed("first")
+    assert accounts.load(settings, "first").email == "first@example.com"
+    portal.auth.store.set_control("first", 1)
+    replacement = portal.auth.store.control("first")
+    assert portal.flow._bind(attempt, "first@example.com") == "failed"
+    assert portal.auth.store.control("first") == replacement
+
+
+def test_failed_attempt_creation_does_not_open_admission(system, monkeypatch):
+    from photos_mcp.errors import PhotosError
+
+    portal, provider, _, client, _ = system
+    assert sign_in(portal, provider, client).status_code == 303
+    portal.auth.store.set_control("first", 1)
+
+    def limited(*args, **kwargs):
+        raise PhotosError("connect_limited")
+
+    monkeypatch.setattr(portal.flow, "create", limited)
+    assert owner_post(client, "/connections/start", headers={"origin": "https://example.com"}).status_code == 429
+    assert not portal.account_allowed("first")
+
+
+def test_recovery_required_has_fixed_owner_api_failure(system):
+    from signin_window.state import atomic_private_write
+
+    from photos_mcp.connection_controls import recovery_path
+
+    portal, provider, backend, client, _ = system
+    assert sign_in(portal, provider, client).status_code == 303
+    atomic_private_write(recovery_path(portal.auth.store, "first"), b"recovery_required\n")
+    assert client.get("/connections/status").json()["state"] == "recovery_required"
+    response = owner_post(client, "/connections/start", headers={"origin": "https://example.com"})
+    assert response.status_code == 503 and response.json() == {"error": "recovery_required"}
+    assert not portal.account_allowed("first") and not backend.started
+
+
+def test_rejected_binding_forgets_after_releasing_authority_transaction(system):
+    portal, provider, backend, client, settings = system
+    assert sign_in(portal, provider, client).status_code == 303
+    url = start(client)
+    attempt = next(link for link in portal.flow.relay.links("first") if link.url.endswith(url))
+    assert accounts.bind_email(settings, "second", "claimed@example.com")
+    forgotten = []
+
+    def forget(account):
+        # A keeper must be able to finish its status transaction before forget
+        # takes its browser lock. Holding this database here would deadlock them.
+        with portal.auth.store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+        forgotten.append(account)
+
+    backend.forget = forget
+    assert portal.flow._bind(attempt, "claimed@example.com") == "in_use"
+    assert forgotten == ["first"]
+    assert portal.auth.store.control("first")[1] == 1

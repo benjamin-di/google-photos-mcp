@@ -6,7 +6,6 @@ paths, account identity, references and permission; no scheduler starts here.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -18,6 +17,8 @@ from pathlib import Path
 from signin_window.automation.secrets import OpSecretReader, load_credential_reader
 from signin_window.leases import LeaseKind, ordered_file_lease
 from signin_window.sessions import AttemptBudget
+
+from photos_mcp.logs import SafeParser, setup
 
 from .browser import open_google_browser
 from .config import load_identity_target
@@ -103,8 +104,8 @@ def connection_guard():
 
 
 def _main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("action", choices=("keep", "status", "acknowledge"))
+    parser = SafeParser(description=__doc__.split("\n")[0])
+    parser.add_argument("action", choices=("keep", "status", "acknowledge", "recover-publication"))
     parser.add_argument("--root", type=Path, default=Path(os.environ.get(PREFIX + "_ROOT", "/maintenance")))
     parser.add_argument("--export-dir", type=Path, default=os.environ.get(PREFIX + "_EXPORT_DIR"))
     parser.add_argument("--expected-email", default=os.environ.get(PREFIX + "_EXPECTED_EMAIL", ""))
@@ -122,6 +123,13 @@ def _main(argv=None):
                 args.root, args.export_dir, args.expected_email, args.credential_reference, timezone_id=args.timezone
             ).run(allow_credential_mint=args.allow_credential_mint)
             payload, code = result.public_dict(), result.exit_code
+        elif args.action == "recover-publication":
+            if args.export_dir is None:
+                raise ValueError("configure the existing snapshot export directory")
+            from .human_state import quarantine_publication
+
+            quarantine_publication(args.root, args.export_dir, connection_guard())
+            payload, code = {"target": TARGET, "outcome": "disconnected", "recovered": True}, 0
         elif args.action == "status":
             report = read_identity_status(TARGET, state=state, budget=budget, now=datetime.now(UTC))
             payload = report.public_dict()
@@ -156,6 +164,7 @@ def _main(argv=None):
 
 
 def main(argv=None):
+    setup("photos-maintenance", default_level="WARNING")
     # Status is observational; every mutating command, including acknowledgment,
     # participates in the same cross-process gate as the human service.
     arguments = __import__("sys").argv[1:] if argv is None else argv
@@ -163,7 +172,7 @@ def main(argv=None):
         return _main(arguments)
     from photos_mcp.deployment import Busy, Gate
 
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = SafeParser(add_help=False)
     parser.add_argument("--root", type=Path, default=Path(os.environ.get(PREFIX + "_ROOT", "/maintenance")))
     options, _ = parser.parse_known_args(arguments)
     try:

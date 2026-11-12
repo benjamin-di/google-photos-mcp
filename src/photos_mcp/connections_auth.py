@@ -21,7 +21,9 @@ from signin_window.state import atomic_private_write
 from starlette.responses import HTMLResponse
 
 from .accounts import valid_id
+from .build_pages import footer_html
 from .config import ConfigError
+from .ui import renderer_options
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,7 @@ class BrowserLogin(BrowserAuth):
             ),
             clock=clock,
             transport=transport,
+            **renderer_options(BrowserAuth),
         )
         self.store = controls
 
@@ -221,12 +224,15 @@ class BrowserLogin(BrowserAuth):
         response = await super().callback(request)
         if response.status_code == 303 and self.mapped(request.session) is None:
             request.session.clear()
+            options = renderer_options(page)
             return HTMLResponse(
                 page(
                     "This sign-in cannot manage a Google Photos connection",
                     "<p>Sign in with the account that manages this connection, "
                     "or ask your administrator to check access.</p>"
-                    f'<a class=button href="{html.escape(self.home, quote=True)}">Back to Connections</a>',
+                    f'<a class=button href="{html.escape(self.home, quote=True)}">Back to Connections</a>'
+                    + ("" if options else footer_html()),
+                    **options,
                 ),
                 status_code=403,
             )
@@ -234,10 +240,15 @@ class BrowserLogin(BrowserAuth):
 
 
 if __name__ == "__main__":
-    import argparse
+    from .logs import SafeParser, diagnostic, setup
 
-    parser = argparse.ArgumentParser(description="Initialize reviewed connection controls once")
+    setup()
+    parser = SafeParser(description="Initialize reviewed connection controls once")
     parser.add_argument("--initialize", action="store_true", required=True)
     parser.add_argument("--folder", type=Path, required=True)
     args = parser.parse_args()
-    BrowserStore(args.folder, require_existing=False)
+    try:
+        BrowserStore(args.folder, require_existing=False)
+    except (ConfigError, ValueError, OSError):
+        diagnostic("Connection controls initialization failed; check configuration and private state permissions")
+        raise SystemExit(1) from None

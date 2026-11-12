@@ -30,6 +30,8 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from photos_mcp.accounts import valid_id
+from photos_mcp.logs import diagnostic, setup
+from photos_mcp.ui import renderer_options
 
 from .keeper import Keeper
 from .profiles import Paths
@@ -108,7 +110,12 @@ def build_app(windows: Windows, keeper: Keeper, paths: Paths, browser_lock: thre
             Route("/accounts/{account}", forget, methods=["DELETE"]),
         ],
         direct_view=False,
+        **renderer_options(service_app),
     )
+
+
+class LoginConfigError(ValueError):
+    pass
 
 
 def _int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -116,19 +123,33 @@ def _int(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         value = int(raw) if raw else default
     except ValueError:
-        raise SystemExit(f"{name} must be an integer") from None
+        raise LoginConfigError(f"{name} must be an integer") from None
     if not minimum <= value <= maximum:
-        raise SystemExit(f"{name} must be between {minimum} and {maximum}")
+        raise LoginConfigError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 
 def main() -> None:
+    setup("photos-login")
+    try:
+        serve()
+    except LoginConfigError as error:
+        diagnostic(str(error), service="photos-login")
+        raise SystemExit(1) from None
+    except (ValueError, OSError, OverflowError) as error:
+        diagnostic(f"Check login configuration and local state ({type(error).__name__})", service="photos-login")
+        raise SystemExit(1) from None
+
+
+def serve() -> None:
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     token = (os.environ.get("PHOTOS_LOGIN_TOKEN") or "").strip()
     if len(token) < 32:
-        raise SystemExit("PHOTOS_LOGIN_TOKEN (at least 32 characters) is required")
+        raise LoginConfigError("PHOTOS_LOGIN_TOKEN (at least 32 characters) is required")
+    port = _int("PORT", 8080, 1, 65535)
+    minutes = _int("PHOTOS_LOGIN_MINUTES", 20, 5, 60)
+    refresh_seconds = _int("PHOTOS_LOGIN_REFRESH_SECONDS", 3600, 600, 6 * 3600)
     paths = Paths(
         profiles=Path(os.environ.get("PHOTOS_LOGIN_PROFILES") or "/profiles"),
         sessions=Path(os.environ.get("PHOTOS_LOGIN_SESSIONS") or "/sessions"),
@@ -145,21 +166,30 @@ def main() -> None:
     windows = Windows(
         SignIn(paths, require_policy=not unmanaged),
         slots=1,
-        minutes=_int("PHOTOS_LOGIN_MINUTES", 20, 5, 60),
+        minutes=minutes,
         xvfb=xvfb,
         x11vnc=os.environ.get("PHOTOS_LOGIN_X11VNC") or "x11vnc",
         lock=browser_lock,
     )
+    controls = None
+    controls_dir = os.environ.get("PHOTOS_CONNECTIONS_CONTROLS_DIR")
+    if controls_dir:
+        from photos_mcp.connections_auth import BrowserStore
+
+        controls = BrowserStore(Path(controls_dir), track_location=False, require_existing=True)
+    elif os.environ.get("CONNECTIONS_REQUIRE_CONTROLS", "0") != "0":
+        raise LoginConfigError("PHOTOS_CONNECTIONS_CONTROLS_DIR is required")
     keeper = Keeper(
         paths,
         browser_lock,
-        every=_int("PHOTOS_LOGIN_REFRESH_SECONDS", 3600, 600, 6 * 3600),
+        every=refresh_seconds,
         xvfb=xvfb,
         deployment=deployment,
+        controls=controls,
     )
     guarded_windows(windows, deployment)
     threading.Thread(target=keeper.run, args=(threading.Event(),), daemon=True, name="keeper").start()
     novnc = Path(os.environ.get("PHOTOS_LOGIN_NOVNC") or "/opt/novnc")
     app = build_app(windows, keeper, paths, browser_lock, token=token, novnc_dir=novnc, require_policy=not unmanaged)
     app.add_middleware(Admission, gate=deployment)
-    uvicorn.run(app, host="0.0.0.0", port=_int("PORT", 8080, 1, 65535), log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning", log_config=None, access_log=False)

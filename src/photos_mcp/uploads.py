@@ -35,6 +35,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from . import accounts
+from .build_pages import footer_html
 from .client import PhotosService
 from .config import Settings
 from .errors import PhotosError, invalid
@@ -332,7 +333,7 @@ def _page(link: Link | None, max_bytes: int = 0) -> str:
     if link is None:
         body = """<main class=msg><h1>This link has expired</h1>
 <p>Upload links work for a short time. Ask your assistant for a new one.</p></main>"""
-        return _fill(PAGE, {"BODY": body, "SCRIPT": ""})
+        return _fill(PAGE, {"BODY": body, "SCRIPT": "", "FOOTER": footer_html()})
     body = _fill(
         BODY,
         {
@@ -342,7 +343,7 @@ def _page(link: Link | None, max_bytes: int = 0) -> str:
             "FILES": str(FILES_PER_LINK - link.files),
         },
     )
-    return _fill(PAGE, {"BODY": body, "SCRIPT": SCRIPT})
+    return _fill(PAGE, {"BODY": body, "SCRIPT": SCRIPT, "FOOTER": footer_html()})
 
 
 BODY = """<header><h1>Add to Google Photos</h1>
@@ -376,6 +377,7 @@ progress{width:100%;height:6px;margin-top:6px}
 a{color:#0b57d0}
 </style>
 {{BODY}}
+{{FOOTER}}
 {{SCRIPT}}
 </html>"""
 

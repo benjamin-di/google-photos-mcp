@@ -23,8 +23,8 @@ Every snapshot is read back with photos-mcp's own reader before it is published.
 
 from __future__ import annotations
 
-import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .logs import SafeParser, diagnostic, setup
 from .session import (
     COOKIE_DOMAINS,
     FETCH_METADATA,
@@ -390,7 +391,9 @@ def browser_login(profile: Path, *, channel: str | None, timeout_s: int = 600) -
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(APP_URL, wait_until="domcontentloaded", timeout=60_000)
-            print("Sign in to Google in the browser window (this tool never sees your password).", file=sys.stderr)
+            diagnostic(
+                "Sign in to Google in the browser window (this tool never sees your password).", level=logging.INFO
+            )
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
                 if (urlsplit(page.url).hostname or "") == APP_HOST and (email := page_email(page.content())):
@@ -512,7 +515,8 @@ def export_from_context(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="photos-mcp-session", description=__doc__.split("\n\n")[0])
+    setup()
+    parser = SafeParser(prog="photos-mcp-session", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
     imp = commands.add_parser("import", help="write a snapshot from a cookies.txt exported from your browser")
     imp.add_argument("--cookies", type=Path, required=True, help="Netscape cookies.txt")
@@ -551,7 +555,18 @@ def main(argv: list[str] | None = None) -> int:
                 channel=args.channel,
             )
     except ExportError as exc:
-        print("photos-mcp-session:", *exc.args, file=sys.stderr)
+        guidance = {
+            "signed_out": "profile signed out; run photos-mcp-session browser login first",
+            "challenge": "Google needs you to sign in again; run photos-mcp-session browser login",
+            "interstitial": "Google shows an account notice; open the browser profile and answer it",
+            "no_account": "the library page did not show a signed-in account; check the browser profile",
+            "account_mismatch": "the browser profile account differs from --expected-email; check the profile",
+            "empty_library": "no photo could be opened; check that the browser profile has a photo",
+        }.get(exc.code, "session export failed; check cookies, browser profile and command options")
+        diagnostic("photos-mcp-session: " + guidance)
+        return 1
+    except Exception:
+        diagnostic("photos-mcp-session: operation failed; check browser installation and private state permissions")
         return 1
     print(json.dumps(result, indent=2))
     return 0

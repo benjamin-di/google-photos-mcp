@@ -109,6 +109,8 @@ class IdentityRunResult(FrozenModel):
         and reports its deliberate suspension separately, retaining any hold.
         """
 
+        if self.outcome is IdentityOutcome.RECOVERY_REQUIRED:
+            return True
         if self.outcome is IdentityOutcome.DISCONNECTED:
             return False  # The reader is blocked; a suspended connection is not a stale active one.
         return self.hold_id is not None or snapshot_is_stale(self.snapshot_age_s)
@@ -271,6 +273,7 @@ class IdentityKeeper:
     def _record_owner_status(self, result):
         if self._connection_guard is None or result.outcome in (
             IdentityOutcome.DISCONNECTED,
+            IdentityOutcome.RECOVERY_REQUIRED,
             IdentityOutcome.COOLDOWN_ACTIVE,
             IdentityOutcome.SKIPPED_LEASE_BUSY,
         ):
@@ -297,15 +300,18 @@ class IdentityKeeper:
             atomic_private_write(self._export_dir / "keeper.json", json.dumps(payload).encode())
 
     def _run_leased(self, *, allow_credential_mint: bool) -> IdentityRunResult:
-        from .human_state import NativePromotion
+        from .human_state import NativePromotion, RecoveryRequired
 
         # A stopped human custodian may have interrupted its two-path commit.
-        NativePromotion(self._state.root.parent, self._export_dir, self._connection_guard).recover()
+        try:
+            NativePromotion(self._state.root.parent, self._export_dir, self._connection_guard).recover()
+        except RecoveryRequired:
+            return self._result(IdentityOutcome.RECOVERY_REQUIRED, reason="recovery_required")
         self._positive_signed_out = False
         # Re-read under the lease: another run may have just held or blocked.
         if self._connection_guard is not None:
             try:
-                self._connection_epoch = self._connection_guard.check()
+                self._connection_epoch = self._connection_guard.require_active()
             except ConnectionSuspended:
                 return self._result(IdentityOutcome.DISCONNECTED)
         early = self.preflight()
@@ -403,7 +409,7 @@ class IdentityKeeper:
             + 1
         )
         if self._snapshot_writer is not None:
-            with self._publication_guard():
+            with self._publication_guard(snapshot=True):
                 self._snapshot_writer(self._export_dir, browser, generation, email, self._utc_now())
                 self._state.record_publish(self._target, generation)
             return generation
@@ -430,7 +436,7 @@ class IdentityKeeper:
                 headers=headers,
             ),
         )
-        with self._publication_guard():
+        with self._publication_guard(snapshot=True):
             publish_snapshot(self._export_dir, staging)
             self._state.record_publish(self._target, generation)
         return generation
@@ -442,16 +448,15 @@ class IdentityKeeper:
             self._positive_signed_out = True
             raise
 
-    def _publication_guard(self):
-        return (
-            self._connection_guard.publish(self._connection_epoch)
-            if self._connection_guard is not None
-            else nullcontext()
-        )
+    def _publication_guard(self, *, snapshot=False):
+        if self._connection_guard is None:
+            return nullcontext()
+        guard = self._connection_guard.snapshot if snapshot else self._connection_guard.status
+        return guard(self._connection_epoch)
 
     def _sign_in(self, browser: TargetBrowser, *, allow: bool) -> None:
         if self._connection_guard is not None:
-            self._connection_guard.check()
+            self._connection_guard.require_active()
         if not allow:
             raise _MintRefused(self._result(IdentityOutcome.MINT_NOT_PERMITTED, reason="session_dead"))
         readiness = self._readiness()

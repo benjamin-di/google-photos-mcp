@@ -96,3 +96,40 @@ The backend's `available` property must not read secrets or contact a provider.
 Only the requested username, password or generated TOTP is resolved just in time.
 Origin checks, error redaction, durable budgets and holds apply to all backends.
 A selected reader's failure never falls back to the ambient 1Password identity.
+
+
+## Publication repair
+
+A mismatched, missing or unverifiable native publication journal reports
+recovery_required with a nonzero exit status and no browser or credential I/O.
+Agents remain refused. Normal recovery cannot clear this held outcome.
+
+With the existing controls and account configured in PHOTOS_CONNECTIONS_CONTROLS_DIR
+and PHOTOS_CONNECTIONS_ACCOUNT, run in the custodian's existing PID namespace:
+
+```sh
+photos-mcp-maintenance recover-publication \
+  --root /maintenance --export-dir /exports/default
+```
+
+This command participates in the deployment gate, takes the native profile lease
+and account lifecycle lock, revokes old publication epochs, and drains admitted
+operations. It durably retains the marker, recovery hold and entire staging/journal
+directory under private publication-quarantine/<operation-id>/, then leaves the
+account Disconnected. It never accepts the retained profile/snapshot, restores an
+old grant, clears a credential hold, or refunds a consumed attempt. A failed repair
+keeps access closed; rerunning it safely retains any remaining evidence.
+The recovery marker remains in place until the staging directory and its parent
+directories are synced in quarantine. Repair copies both markers first, removes
+the pending marker after that move, and removes the recovery marker last. An
+interrupted repair cannot turn uncertain evidence back into ordinary recovery.
+
+Inspect quarantined evidence only as privileged local state: it can contain full
+account authority. Keep it private and outside source control. Do not delete a
+marker by hand or restore an older controls database. After repair, the owner must
+start a new sign-in and independently verify a fresh snapshot before access returns.
+
+Storage compatibility alone does not make an older binary a safe rollback. The
+rollback target must preserve suspended reconnects, keeper admission and recovery
+holds. Otherwise keep the affected writers and Start disabled, even after repair
+has removed the recovery marker. Preserve the current controls, epochs and holds.

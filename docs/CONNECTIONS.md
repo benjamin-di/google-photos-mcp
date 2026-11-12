@@ -244,3 +244,25 @@ It must not run automatically to repair a damaged or missing adopted volume.
 Keep markers with current controls, bindings, credentials and accounting; check
 actual mounted state before startup and recover on disposable copies. An older
 backup or an image that ignores controls is not a safe way to clear a disconnect.
+
+
+## Reconnect and publication repair
+
+Connect rotates the authority revision while keeping admission suspended.
+Cancelling, expiring or abandoning the attempt leaves agents and maintenance refused.
+Only verified native promotion, or binding a verified further-account result under
+the current revision, opens admission. A native relay result alone cannot do so.
+
+Give the further-account login service the same existing controls directory through
+PHOTOS_CONNECTIONS_CONTROLS_DIR, and set CONNECTIONS_REQUIRE_CONTROLS=1.
+Its keeper checks admission after acquiring the browser lock and records every outcome
+before releasing that lock. A disconnect during a refresh prevents a success record;
+disconnect confirmation still drains that refresh before deleting its credentials.
+
+Inconsistent native publication evidence reports the fixed recovery_required
+outcome. The owner UI refuses Start; a failed Disconnect retains its barrier.
+The human service remains available for health and fixed failure responses.
+--recover-only returns {"status":"recovery_required"} and exits nonzero for
+this held state. It never guesses which journal or marker to trust. Use the
+[leased publication repair command](MAINTENANCE.md#publication-repair), then
+start a fresh owner sign-in.

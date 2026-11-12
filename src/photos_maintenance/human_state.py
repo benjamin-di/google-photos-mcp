@@ -18,7 +18,7 @@ from uuid import uuid4
 from signin_window.automation.profiles import prepare_profile
 from signin_window.state import atomic_private_write, fsync_directory, read_private_file
 
-from photos_mcp.connection_controls import ConnectionAdmission, pending_path
+from photos_mcp.connection_controls import ConnectionAdmission, pending_path, recovery_path, recovery_required
 from photos_mcp.session import read_snapshot
 
 from .state import TargetStateStore
@@ -54,6 +54,13 @@ def private_profile_tree(profile):
         for name in directories + files:
             if name not in SINGLETONS and (Path(directory) / name).is_symlink():
                 raise ValueError("profile contains an unverified link")
+
+
+class RecoveryRequired(ValueError):
+    """Publication evidence must be retained for explicit operator recovery."""
+
+    def __init__(self):
+        super().__init__("recovery_required")
 
 
 class NativePromotion:
@@ -103,6 +110,16 @@ class NativePromotion:
         fsync_directory(self.work)
 
     def recover(self):
+        if self.guard is not None and recovery_required(self.guard.store, self.guard.account):
+            raise RecoveryRequired()
+        try:
+            self._recover()
+        except (ValueError, OSError, KeyError, TypeError, AttributeError):
+            if self.guard is not None:
+                atomic_private_write(recovery_path(self.guard.store, self.guard.account), b"recovery_required\n")
+            raise RecoveryRequired() from None
+
+    def _recover(self):
         if not self.journal.exists():
             if self.pending is not None and (self.pending.exists() or self.pending.is_symlink()):
                 raise ValueError("native publication marker has no matching journal")
@@ -236,7 +253,7 @@ class NativePromotion:
         if self.pending is not None:
             atomic_private_write(self.pending, json.dumps({"id": data["id"], "phase": "prepared"}).encode())
         checkpoint("prepared")
-        with admission, guard.publish(epoch):
+        with admission, guard.snapshot(epoch, activate=True):
             validate()
             exchange(self.profile, self.candidate)
             checkpoint("profile")
@@ -257,3 +274,49 @@ class NativePromotion:
             self.recover()
         elif self.work.exists():
             self._cleanup()
+
+
+def quarantine_publication(root, export, guard):
+    """Retain uncertain evidence under lifecycle/profile leases; never activate."""
+    from .cli import lease
+
+    if guard is None:
+        raise ValueError("existing connection controls are required")
+    promotion = NativePromotion(root, export, guard)
+    admission = ConnectionAdmission(guard.store)
+    # Disconnect holds lifecycle while waiting for the custodian's profile lease.
+    with admission.lock(guard.account, exclusive=True, lifecycle=True), lease(root):
+        # Revoke every old publisher before touching either evidence location.
+        guard.store.control(guard.account)  # Validate existing adopted controls before writing.
+        guard.store.set_control(guard.account, 2)
+        with admission.lock(guard.account, exclusive=True):
+            recovery = recovery_path(guard.store, guard.account)
+            if not (recovery.exists() or recovery.is_symlink()):
+                atomic_private_write(recovery, b"recovery_required\n")
+            quarantine = root / "publication-quarantine"
+            quarantine.mkdir(mode=0o700, exist_ok=True)
+            if quarantine.is_symlink():
+                raise ValueError("quarantine must be a private directory")
+            destination = quarantine / uuid4().hex
+            destination.mkdir(mode=0o700)
+            fsync_directory(destination.parent)
+            fsync_directory(root)
+            markers = (
+                (promotion.pending, "pending.json"),
+                (recovery, "recovery-required"),
+            )
+            for source, name in markers:
+                if source.exists() or source.is_symlink():
+                    # Keep the recovery fence until all live evidence is durably quarantined.
+                    atomic_private_write(destination / name, read_private_file(source, max_bytes=4096))
+            if promotion.work.exists() or promotion.work.is_symlink():
+                if promotion.work.is_symlink():
+                    raise ValueError("native staging must be a private directory")
+                promotion.work.rename(destination / "human-recovery")
+                fsync_directory(destination)
+                fsync_directory(root)
+            for source, _ in markers:
+                source.unlink(missing_ok=True)
+                fsync_directory(source.parent)
+            # Retained profile/snapshot are never accepted by this command.
+            guard.store.set_control(guard.account, 1)

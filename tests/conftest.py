@@ -102,6 +102,10 @@ class FakeTransport:
     def current_snapshot(self):
         return self.snapshot
 
+    def bound_view(self):
+        # No credentials/session/HTTP state exists in this synthetic album adapter.
+        return self
+
     @property
     def rpcids(self) -> list[list[str]]:
         return [[rpcid for rpcid, _ in call] for call in self.calls]

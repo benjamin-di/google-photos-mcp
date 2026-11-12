@@ -1,23 +1,25 @@
 # syntax=docker/dockerfile:1.7
 # photos-mcp: source on top of photos-mcp-deps (Dockerfile.deps). The release workflow builds
 # both stages as one chain; locally:
-#   docker build -f Dockerfile.deps -t photos-mcp-deps . && docker build -t photos-mcp .
+#   docker build -f Dockerfile.deps -t photos-mcp-deps . && docker build --build-arg VERSION=0.13.1 --build-arg VCS_REF="$(git rev-parse HEAD)" -t photos-mcp .
 ARG PHOTOS_MCP_DEPS_IMAGE=photos-mcp-deps:latest
 FROM ${PHOTOS_MCP_DEPS_IMAGE}
 
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE NOTICE THIRD_PARTY_NOTICES ./
 COPY src ./src
+COPY scripts/embed-build-identity.py /tmp/embed-build-identity.py
+ARG VERSION
+ARG VCS_REF
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --compile-bytecode --no-deps . \
+    python /tmp/embed-build-identity.py "$VERSION" "$VCS_REF" \
+    && uv pip install --system --compile-bytecode --no-deps . \
     && rm -rf /app/src
 
 # /session: the read-only snapshot. /state: budgets, breaker and the thumbnail cache. Runs as
 # uid 1000 and works on a read-only root filesystem.
 RUN mkdir -p /session /state && chown 1000:1000 /state
 
-ARG VERSION=unknown
-ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG SOURCE_URL=unknown
 LABEL org.opencontainers.image.title="photos-mcp" \

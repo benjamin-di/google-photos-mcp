@@ -42,12 +42,10 @@ place. Review the output before checking any of it in under ``tests/fixtures/rec
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
 import re
-import sys
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -58,6 +56,7 @@ from urllib.parse import urlsplit
 from . import rpc
 from .client import PhotosService
 from .errors import PhotosError
+from .logs import SafeParser, diagnostic, setup
 from .transport import IMAGE_HOSTS, PAGE_HOST, HttpResponse
 from .vendor.gpwc import payloads
 from .vendor.gpwc.payloads import Payload
@@ -374,7 +373,7 @@ def rescrub(directory: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="capture-fixtures", description=__doc__.split("\n\n")[0])
+    parser = SafeParser(prog="capture-fixtures", description=__doc__.split("\n\n")[0])
     parser.add_argument("out_dir", type=Path, help="new directory for the recordings (created, mode 0700)")
     parser.add_argument("--query", default="2024", help="search query to record (default: 2024)")
     parser.add_argument("--max-items", type=int, default=MAX_ITEMS, help="records kept per list (default 10)")
@@ -382,7 +381,18 @@ def main(argv: list[str] | None = None) -> int:
         "--rescrub", action="store_true", help="re-anonymise the recordings already in out_dir, offline"
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    setup()
+    try:
+        return _run(args)
+    except PhotosError as exc:
+        diagnostic("fixture capture failed", error=exc.code)
+        return 1
+    except Exception:
+        diagnostic("fixture capture failed; check settings and private output directory")
+        return 1
+
+
+def _run(args) -> int:
     if args.rescrub:
         print(json.dumps({"rewritten": rescrub(args.out_dir)}, indent=2))
         return 0
@@ -397,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir: Path = args.out_dir
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if any(out_dir.iterdir()):
-        print(f"{out_dir} is not empty", file=sys.stderr)
+        diagnostic("fixture output directory is not empty; choose a new private directory")
         return 2
     state = StateStore(
         settings.state_dir,
@@ -407,17 +417,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     transport = GoogleTransport(SessionReader(settings.session_dir), state, expected_email=settings.expected_email)
     service = PhotosService(transport, ThumbCache(settings.cache_dir, 0))
-    try:
-        written, failed = capture(
-            service,
-            lambda cookies: transport.probe_page(with_cookies=cookies),
-            out_dir,
-            query=args.query,
-            max_items=args.max_items,
-        )
-    except PhotosError as exc:
-        print(json.dumps({"error": exc.code}), file=sys.stderr)
-        return 1
+    written, failed = capture(
+        service,
+        lambda cookies: transport.probe_page(with_cookies=cookies),
+        out_dir,
+        query=args.query,
+        max_items=args.max_items,
+    )
     print(json.dumps({"written": written, "failed": failed}, indent=2))
     return 0
 

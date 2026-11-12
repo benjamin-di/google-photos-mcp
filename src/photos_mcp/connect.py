@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 from signin_window.page import PageText
@@ -28,8 +29,10 @@ from starlette.applications import Starlette
 
 from . import accounts
 from .config import Settings
+from .connection_controls import ConnectionSuspended, PublicationGuard
 from .errors import PhotosError
 from .login_client import LoginClient, LoginUnavailable
+from .ui import renderer_options
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +70,9 @@ TEXT = PageText(
         "<h1>Your library looks empty</h1><p>There was no photo to open, so nothing was connected. Add a photo to "
         "Google Photos and try again.</p>"
     ),
+    recovery_required=(
+        "<h1>Connection recovery required</h1><p>Ask your administrator to repair local publication state.</p>"
+    ),
     busy="<h1>The server's browser is busy</h1><p>Please try again in a few minutes.</p>",
     expired="<h1>This link has expired</h1><p>Return to Connections to start a new Google Photos sign-in.</p>",
     failed="<h1>Something went wrong</h1><p>Nothing was connected.</p>",
@@ -85,9 +91,10 @@ class ConnectFlow:
         text=None,
         public_url=None,
         deployment=None,
+        controls=None,
     ) -> None:
         assert settings.public_url
-        self.settings, self.client = settings, client
+        self.settings, self.client, self.controls = settings, client, controls
         self.revision = revision or (lambda account: str(account.created_at))
         # The relay runs one hook at a time: the binding checks and the write go together.
         if deployment is not None:
@@ -98,7 +105,11 @@ class ConnectFlow:
             relay = functools.partial(DeploymentRelay, deployment=deployment)
         else:
             relay = Relay
-        self.relay = relay(client, (public_url or settings.public_url).rstrip("/") + "/connect", text=text or TEXT,
+        text = text or TEXT
+        options = renderer_options(PageText)
+        if options:
+            text = replace(text, **options)
+        self.relay = relay(client, (public_url or settings.public_url).rstrip("/") + "/connect", text=text,
                            clock=clock, authorize=authorize,
                            before_start=self._before_start, on_ended=self._ended)  # fmt: skip
 
@@ -154,23 +165,47 @@ class ConnectFlow:
         return self._bind(link, str(window.get("email") or ""))
 
     def _bind(self, link: Link, email: str) -> str:
+        if self.controls is None:
+            result = self._bind_verified(link, email)
+            return self._forget_refused(link) if result == "in_use" else result
+        if not link.context:
+            return "failed"
+        guard = PublicationGuard(self.controls, link.key)
+        epoch = link.context.target.split(":", 1)[1]
+        # Native promotion opens admission itself, with its snapshot receipt.
+        # A relay result alone cannot activate retained native credentials.
+        boundary = guard.status(epoch) if link.key == self.settings.default_account else guard.activate(epoch)
+        result = "failed"
+        try:
+            with boundary:
+                result = self._bind_verified(link, email)
+                if result != "connected":
+                    raise ConnectionSuspended()
+                return result
+        except ConnectionSuspended:
+            return self._forget_refused(link) if result == "in_use" else "failed"
+
+    def _bind_verified(self, link: Link, email: str) -> str:
         bound = (
             email.strip().lower() == self.settings.expected_email
             if link.key == self.settings.default_account
             else accounts.bind_email(self.settings, link.key, email)
         )
         if not bound:
-            # The login service checked the same rules before it wrote the snapshot; this is a race with another
-            # account binding the same address. That snapshot must not stay: the account starts over.
-            log.warning("connect: account %s could not be bound to the address it signed in as", link.key)
-            try:
-                self.client.forget(link.key)
-            except LoginUnavailable:
-                pass
             return "in_use"
         link.show(email=accounts.mask_email(email.strip().lower()))
         log.info("connect: account %s signed in", link.key)
         return "connected"
+
+    def _forget_refused(self, link):
+        # Forget can wait for a keeper holding the browser lock and waiting to
+        # record its result in SQLite. Never call it inside a control transaction.
+        log.warning("connect: account %s could not be bound to the address it signed in as", link.key)
+        try:
+            self.client.forget(link.key)
+        except LoginUnavailable:
+            pass
+        return "in_use"
 
     def app(self) -> Starlette:
         return self.relay.app()

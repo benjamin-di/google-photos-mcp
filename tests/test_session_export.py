@@ -64,7 +64,12 @@ def test_import_refuses_a_user_agent_photos_mcp_cannot_replay(tmp_path, user_age
 def test_main_reports_errors_without_a_traceback(tmp_path, capsys):
     args = ["import", "--cookies", str(tmp_path / "missing.txt"), "--email", "a@example.com"]
     assert export.main([*args, "--user-agent", UA, "--out", str(tmp_path / "s")]) == 1
-    assert capsys.readouterr().err.startswith("photos-mcp-session: cannot read")
+    event = json.loads(capsys.readouterr().err)
+    assert (
+        event["msg"] == "photos-mcp-session: session export failed; check cookies, browser profile and command options"
+    )
+    assert event["service"] == "photos-mcp" and event["instance"]
+    assert str(tmp_path) not in json.dumps(event)
 
 
 def test_browser_cookies_follow_playwright_domain_conventions():

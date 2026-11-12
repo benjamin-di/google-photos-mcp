@@ -97,6 +97,8 @@ DETAILS_MAX = 20
 class Transport(Protocol):
     state: StateStore
 
+    def bound_view(self) -> Transport: ...
+
     def rpc(self, payloads: Sequence[Payload]) -> list[RpcResult]: ...
 
     def write(self, payloads: Sequence[Payload]) -> list[RpcResult]: ...
@@ -274,6 +276,7 @@ class PhotosService:
         # below (cursors, page and item caches, the thumbnail cache, budgets, the canary) is this account's alone.
         self.account = account
         self.sign_in_links = sign_in_links
+        self._conditional = False
         self._t = transport
         self._cache = cache
         self._cursors = cursors or CursorStore()
@@ -292,6 +295,41 @@ class PhotosService:
     @property
     def state(self) -> StateStore:
         return self._t.state
+
+    def fresh_view(self) -> PhotosService:
+        """Keep conditional pages/album metadata isolated from concurrent unbound calls.
+
+        Cursors retain only pagination state, not page contents. Session and HTTP
+        caches are fresh too; budgets, pacing and session policy remain shared.
+        """
+        view = PhotosService(
+            self._t.bound_view(),
+            self._cache,
+            self._cursors,
+            clock=self._clock,
+            account=self.account,
+            sign_in_links=self.sign_in_links,
+        )
+        view._conditional = True
+        return view
+
+    def _album_page(self, data: Any, key: str) -> rpc.RawAlbumPage:
+        # The general parser tolerates missing fields. Conditional observations
+        # must never turn discarded records or continuation into absence evidence.
+        if self._conditional:
+            if not isinstance(data, list) or len(data) < 4:
+                raise PhotosError("schema_changed", log_detail="conditional album page shape")
+            items, token, meta = data[1:4]
+            if not isinstance(items, list) or any(
+                not isinstance(item, list) or not item or not isinstance(item[0], str) or not ID_RE.fullmatch(item[0])
+                for item in items
+            ):
+                raise PhotosError("schema_changed", log_detail="conditional album item structure")
+            if token is not None and not isinstance(token, str):
+                raise PhotosError("schema_changed", log_detail="conditional album continuation structure")
+            if not isinstance(meta, list) or not meta or meta[0] != key:
+                raise PhotosError("schema_changed", log_detail="conditional album identity missing or mismatched")
+        return rpc.parse_album_page(data)
 
     # -- tools --------------------------------------------------------------------------
 
@@ -358,7 +396,7 @@ class PhotosService:
                 data = self._one(payload, required=False)
                 if data is None:
                     raise PhotosError("item_unavailable", log_detail="album page missing")
-                page = rpc.parse_album_page(data)
+                page = self._album_page(data, key)
                 if page.auth_key:
                     self._album_auth.setdefault(key, page.auth_key)
                 return _Page(page.items, page.next_token, {"id": key, "title": page.title, "count": page.item_count})
@@ -621,27 +659,36 @@ class PhotosService:
         """Remove up to 50 items from an album (they stay in the library). Only the ids its own listing holds are
         removed (Google's remove RPC names no album, so a key from another album would act there); the outcome is
         read back from the album. The client asks the person before this runs (it is on the registry's ask list)."""
-        key = _album_key(album_id)
-        keys = check_ids(ids, ALBUM_ITEMS_MAX)
-        before = self._album_state(key)
-        found = list(self._find_in_album(key, keys))
-        if not found:
-            raise invalid("none of these ids is in this album: use the ids photos_list(source=album) gives")
-        self.state.take("write", len(found))
-        payload = (
-            album_payloads.RemoveItemsFromSharedAlbum(key, found)
-            if before["shared"]
-            else album_payloads.RemoveItemsFromAlbum(found)
-        )
-        self._write([payload], action="remove", album=key, items=len(found))
-        after = self._album_state(key)
-        return {
-            "album": after,
-            "requested": len(keys),
-            "removed": _difference(before.get("count"), after.get("count")),
-            "not_in_album": [k for k in keys if k not in found],
-            "freshness": self._freshness(),
-        }
+        phase = "before_write"
+        try:
+            key = _album_key(album_id)
+            keys = check_ids(ids, ALBUM_ITEMS_MAX)
+            before = self._album_state(key)
+            found = list(self._find_in_album(key, keys))
+            if not found:
+                raise invalid("none of these ids is in this album: use the ids photos_list(source=album) gives")
+            self.state.take("write", len(found))
+            payload = (
+                album_payloads.RemoveItemsFromSharedAlbum(key, found)
+                if before["shared"]
+                else album_payloads.RemoveItemsFromAlbum(found)
+            )
+            phase = "write_attempted"
+            self._write([payload], action="remove", album=key, items=len(found))
+            phase = "read_back"
+            after = self._album_state(key)
+            return {
+                "album": after,
+                "requested": len(keys),
+                "removed": _difference(before.get("count"), after.get("count")),
+                "not_in_album": [k for k in keys if k not in found],
+                "freshness": self._freshness(),
+                "mutation": {"phase": "read_back", "definitely_unsent": False},
+            }
+        except PhotosError as exc:
+            raise (exc if exc.mutation is not None else exc.at_mutation(phase)) from None
+        except Exception:
+            raise PhotosError("internal_error").at_mutation(phase) from None
 
     def album_delete(self, album_id: str) -> dict[str, Any]:
         """Delete one of this account's own albums (its photos stay in the library), read back: the album no longer
@@ -803,10 +850,14 @@ class PhotosService:
         try:
             results = self._t.write(requests)
         except PhotosError as exc:
+            # Transport evidence describes one RPC. Other tools can have already
+            # completed an earlier write (create then add, or upload then add).
+            if action != "remove" and exc.mutation is not None:
+                exc = exc.at_mutation("write_attempted")
             self.state.audit({"action": action, "album": album, "items": items, "outcome": exc.code})
             if exc.code == "outcome_unknown":
                 self._forget_pages()
-            raise
+            raise exc from None
         by_id = {r.payload_id: r for r in results}
         data = [by_id[p.payload_id].data if p.payload_id in by_id else None for p in requests]
         self._forget_pages()
@@ -826,7 +877,7 @@ class PhotosService:
         data = self._one(payloads.GetAlbumPage(key, auth_key=self._album_auth.get(key)), required=False)
         if data is None:
             raise PhotosError("item_unavailable", log_detail="album page missing")
-        page = rpc.parse_album_page(data)
+        page = self._album_page(data, key)
         if page.auth_key:
             with self._lock:
                 self._album_auth.setdefault(key, page.auth_key)
@@ -873,8 +924,10 @@ class PhotosService:
             payload = payloads.GetAlbumPage(key, page_id=token, auth_key=self._album_auth.get(key))
             data = self._one(payload, required=False)
             if data is None:
+                if self._conditional:
+                    raise PhotosError("schema_changed", log_detail="conditional album page missing")
                 break
-            page = rpc.parse_album_page(data)
+            page = self._album_page(data, key)
             for item in page.items:
                 if item.media_key in remaining:
                     found[item.media_key] = item
@@ -1213,7 +1266,9 @@ class PhotosService:
                 self._log_item(exc)
                 continue
             for key, raw in zip(chunk, data, strict=True):
-                found[key] = rpc.parse_item_info_ext(raw)
+                ext = rpc.parse_item_info_ext(raw)
+                self._capture_identity(key, raw, ext)
+                found[key] = ext
         for item in items:
             ext = found.get(item["id"])
             item["lat"] = round(ext.lat, 6) if ext and ext.lat is not None else None
@@ -1262,9 +1317,18 @@ class PhotosService:
 
     # -- internals: items ---------------------------------------------------------------
 
+    def _capture_identity(self, key: str, data: Any, parsed: Any) -> None:
+        """Never label another item's provider record with the requested capture ID."""
+        if self._conditional and data is not None:
+            identity = parsed.media_key if parsed is not None else None
+            if not isinstance(identity, str) or not ID_RE.fullmatch(identity) or identity != key:
+                raise PhotosError("schema_changed", log_detail="conditional detail identity unavailable or different")
+
     def _info(self, key: str, ext_data: Any, info_data: Any) -> dict[str, Any]:
         ext = rpc.parse_item_info_ext(ext_data)
         info = rpc.parse_item_info(info_data)
+        self._capture_identity(key, ext_data, ext)
+        self._capture_identity(key, info_data, info)
         if ext is None and info is None:
             raise PhotosError("item_unavailable", log_detail="fDcn4b and VrseUb returned nothing")
         if info is not None:
@@ -1314,6 +1378,7 @@ class PhotosService:
     def _resolve(self, key: str) -> ItemMeta:
         (data,) = self._rpc(payloads.GetItemInfo(key))
         info = rpc.parse_item_info(data)
+        self._capture_identity(key, data, info)
         if info is None or not info.thumbnail_url:
             raise PhotosError("item_unavailable", log_detail="VrseUb gave no thumbnail")
         meta = ItemMeta(info.thumbnail_url, info.is_video, rpc.iso_time(info.taken_ts, info.tz_offset))
@@ -1347,7 +1412,8 @@ class PhotosService:
         return results
 
     def _thumbnail(self, key: str, px: int, *, use_cache: bool = True) -> tuple[bytes, dict[str, Any], bool]:
-        cached = self._cache.get(key, px) if use_cache else None
+        shared_cache = use_cache and not self._conditional
+        cached = self._cache.get(key, px) if shared_cache else None
         if cached is not None:
             return cached[0], cached[1], True
         with self._lock:
@@ -1370,7 +1436,8 @@ class PhotosService:
             raw = self._t.fetch_image(sized_url(meta.thumb_url, px))
         jpeg, width, height = to_jpeg(raw, px)
         info = {"w": width, "h": height, "video": meta.is_video, "taken_at": meta.taken_at}
-        self._cache.put(key, px, jpeg, info)
+        if not self._conditional:
+            self._cache.put(key, px, jpeg, info)
         return jpeg, info, False
 
     def _freshness(self) -> dict[str, Any]:

@@ -6,7 +6,6 @@ reader, planner, provider token, or account filesystem is exposed over HTTP.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
@@ -28,11 +27,13 @@ from photos_login import window
 from photos_mcp.accounts import valid_id
 from photos_mcp.connection_controls import ConnectionSuspended, PublicationGuard
 from photos_mcp.connections_auth import BrowserStore
+from photos_mcp.logs import SafeParser, diagnostic, setup
 from photos_mcp.session import read_snapshot
 from photos_mcp.session_export import ExportError, published_generation
+from photos_mcp.ui import renderer_options
 
 from .cli import lease
-from .human_state import NativePromotion, target_store
+from .human_state import NativePromotion, RecoveryRequired, target_store
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ class DefaultSignIn:
                 promotion.recover()
                 epoch = login.params["epoch"]
                 guard = config.guard()
-                if guard.check() != epoch:
+                if guard.attempt(epoch) != epoch:
                     raise ConnectionSuspended()
                 store = target_store(config.root)
                 before = store.load("google")
@@ -134,6 +135,8 @@ class DefaultSignIn:
                     login.finish("connected")
                 finally:
                     promotion.discard()
+        except RecoveryRequired:
+            login.finish("recovery_required")
         except (LeaseBusyError, ProfileError):
             login.finish("busy")
         except window.Refused as error:
@@ -166,7 +169,7 @@ def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_polic
             raise ValueError("invalid account bindings")
         epoch = body.get("epoch")
         try:
-            current = guard.check()
+            current = guard.attempt(epoch)
         except ConnectionSuspended:
             raise ValueError("disconnected connection") from None
         if not isinstance(epoch, str) or epoch != current:
@@ -205,6 +208,8 @@ def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_polic
 
         try:
             await asyncio.to_thread(drain)
+        except RecoveryRequired:
+            return JSONResponse({"error": "recovery_required"}, status_code=503)
         except LeaseBusyError:
             return JSONResponse({"error": "busy"}, status_code=503)
         return Response(status_code=204)  # Native accepted profile and snapshot are retained.
@@ -216,6 +221,7 @@ def build_app(config, *, token, novnc_dir, sign_in=window.sign_in, require_polic
         start_params=params,
         direct_view=False,
         routes=[Route("/accounts/{account}", forget, methods=["DELETE"])],
+        **renderer_options(service_app),
     )
     original_lifespan = app.router.lifespan_context
 
@@ -244,27 +250,46 @@ def recover(config):
         try:
             with lease(config.root):
                 NativePromotion(config.root, config.export, config.guard()).recover()
-            return
+            return True
+        except RecoveryRequired:
+            return False
         except LeaseBusyError:
             time.sleep(0.2)
 
 
 def main(argv=None):
+    setup("photos-maintenance", default_level="WARNING")
+    try:
+        serve(argv)
+    except (ValueError, OSError, OverflowError) as error:
+        diagnostic(
+            f"Check recovery service configuration and local state ({type(error).__name__})",
+            service="photos-maintenance",
+        )
+        raise SystemExit(1) from None
+
+
+def serve(argv=None):
     import uvicorn
 
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = SafeParser(description=__doc__.split("\n")[0])
     parser.add_argument(
         "--recover-only", action="store_true", help="recover the native journal and exit before serving"
     )
     args = parser.parse_args(argv)
     from photos_mcp.deployment import Admission, Gate
 
+    port = 8081 if args.recover_only else int(os.environ.get("PHOTOS_DEFAULT_LOGIN_PORT", "8081"))
+    if not 1 <= port <= 65535:
+        raise ValueError("configure a valid recovery service port")
     config = Config.from_env()
     deployment = Gate(config.root, "maintenance").start()
     if args.recover_only:
         with deployment.work():
-            recover(config)
-        print('{"status":"recovered"}')
+            recovered = recover(config)
+        print(json.dumps({"status": "recovered" if recovered else "recovery_required"}))
+        if not recovered:
+            raise SystemExit(1)
         return
     token = os.environ.get("PHOTOS_LOGIN_TOKEN", "")
     if len(token) < 32:
@@ -276,8 +301,9 @@ def main(argv=None):
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=int(os.environ.get("PHOTOS_DEFAULT_LOGIN_PORT", "8081")),
+        port=port,
         log_level="warning",
+        log_config=None,
         access_log=False,
     )
 

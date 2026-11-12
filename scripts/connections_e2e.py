@@ -22,6 +22,7 @@ from pathlib import Path
 
 import httpx2
 import uvicorn
+from patchright.async_api import TimeoutError as BrowserTimeout
 from patchright.async_api import async_playwright
 from signin_window.service import Windows
 from starlette.applications import Starlette
@@ -32,15 +33,17 @@ from photos_login.app import build_app
 from photos_login.keeper import Keeper
 from photos_login.profiles import Paths
 from photos_login.windows import SignIn
-from photos_maintenance.cli import stores
+from photos_maintenance.cli import lease, stores
 from photos_maintenance.human import Config as HumanConfig
 from photos_maintenance.human import build_app as human_app
 from photos_maintenance.human_state import NativePromotion
-from photos_maintenance.outcomes import HoldReason
+from photos_maintenance.keeper import IdentityKeeper
+from photos_maintenance.models import ProviderReadiness
+from photos_maintenance.outcomes import HoldReason, IdentityOutcome
 from photos_mcp import accounts, session_export
 from photos_mcp.config import Settings
 from photos_mcp.connections import Connections
-from photos_mcp.connections_auth import ConnectionsConfig
+from photos_mcp.connections_auth import BrowserStore, ConnectionsConfig
 from photos_mcp.login_client import LoginClient, RoutedLoginClient
 from photos_mcp.session import parse_cookies_txt, read_snapshot
 
@@ -66,6 +69,10 @@ def serve(app, listen):
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     return server, thread
+
+
+def refuse_browser():
+    raise AssertionError("disconnected maintenance must not open a browser")
 
 
 class SyntheticSignIn:
@@ -218,9 +225,10 @@ async def run():
                     xvfb=os.environ.get("PHOTOS_LOGIN_XVFB", "Xvfb"),
                     x11vnc=os.environ.get("PHOTOS_LOGIN_X11VNC", "x11vnc"),
                 )
+                shared_controls = BrowserStore(root / "state" / "connections", track_location=False)
                 login_app = build_app(
                     windows,
-                    Keeper(paths, lock, refresher=lambda **kw: {}),
+                    Keeper(paths, lock, controls=shared_controls, refresher=lambda **kw: {}),
                     paths,
                     lock,
                     token=login_key,
@@ -339,26 +347,43 @@ async def run():
                             response = await context.request.post(issuer + "/api/one-time-access-token/" + token)
                             assert response.ok
                             await page.goto(issuer + "/settings/account")
-                            await page.get_by_role("button", name=re.compile("add passkey", re.I)).first.click()
-                            await page.wait_for_timeout(700)
+                            created = asyncio.Event()
+
+                            def credential_added(event, expected=authenticator["authenticatorId"], ready=created):
+                                if event["authenticatorId"] == expected:
+                                    ready.set()
+
+                            cdp.on("WebAuthn.credentialAdded", credential_added)
+                            try:
+                                await page.get_by_role("button", name=re.compile("add passkey", re.I)).first.click()
+                                await wait_for(created.is_set)
+                            finally:
+                                cdp.remove_listener("WebAuthn.credentialAdded", credential_added)
                             credentials = await cdp.send(
                                 "WebAuthn.getCredentials", {"authenticatorId": authenticator["authenticatorId"]}
                             )
                             assert len(credentials["credentials"]) == 1
+
                             # Confirm enrollment through the provider API.
-                            response = admin.get(f"/api/users/{user['id']}/webauthn-credentials")
-                            assert response.status_code == 200 and response.json(), "Passkey enrollment did not finish"
+                            def registration_saved(user_id=user["id"]):
+                                response = admin.get(f"/api/users/{user_id}/webauthn-credentials")
+                                assert response.status_code == 200, "Passkey enrollment check failed"
+                                return bool(response.json())
+
+                            await wait_for(registration_saved)
                             await context.clear_cookies()
                             await page.goto(origin + "/connections/")  # signed out: straight to sign-in
-                            for _ in range(6):
-                                await page.wait_for_timeout(500)
-                                if page.url == origin + "/connections/":
-                                    break
+                            deadline = time.monotonic() + 30
+                            while page.url != origin + "/connections/":
+                                assert time.monotonic() < deadline, "OIDC sign-in did not finish"
                                 button = page.get_by_role(
                                     "button", name=re.compile(r"^(Authenticate|Sign in|Allow|Authorize)$")
                                 )
-                                if await button.count() and await button.first.is_visible():
-                                    await button.first.click()
+                                try:
+                                    await button.first.click(timeout=500)
+                                except BrowserTimeout:
+                                    pass
+                                await asyncio.sleep(0.1)
                             await page.wait_for_url(origin + "/connections/", timeout=20000)
                             assert "Sign-in required" in await page.content()
                             used = await cdp.send(
@@ -459,6 +484,52 @@ async def run():
                         assert "browser profile is kept" in await native_page.content()
                         print(
                             "PASS: expired native default owner recovery, kept profile, account isolation and ledger",
+                            flush=True,
+                        )
+                        native_keeper = IdentityKeeper(
+                            target="google",
+                            expected_email=settings.expected_email,
+                            export_dir=settings.session_dir,
+                            state=native_state,
+                            budget=native_budget,
+                            readiness=ProviderReadiness,
+                            open_browser=refuse_browser,
+                            lease=lambda: lease(native_config.root),
+                            utc_now=lambda: datetime.now(UTC),
+                            connection_guard=native_config.guard(),
+                        )
+                        await native_page.get_by_role("button", name="Connect", exact=True).click()
+                        await native_page.wait_for_url(origin + "/connect/*")
+                        abandoned_link = native_page.url
+                        await (
+                            native_page.frame_locator("iframe").locator("html.noVNC_connected").wait_for(timeout=30000)
+                        )
+                        assert not replacement.account_allowed(settings.default_account)
+                        assert (
+                            native_keeper.run(allow_credential_mint=True).outcome == IdentityOutcome.SKIPPED_LEASE_BUSY
+                        )
+                        cancelled = await default.request.post(abandoned_link + "/cancel", headers={"Origin": origin})
+                        assert cancelled.status == 204
+                        assert not replacement.account_allowed(settings.default_account)
+                        assert native_keeper.run(allow_credential_mint=True).outcome == IdentityOutcome.DISCONNECTED
+                        assert read_snapshot(settings.session_dir).generation == 8
+                        native_synthetic.saving.clear()
+                        native_synthetic.publish.clear()
+                        await native_page.goto(origin + "/connections/")
+                        await native_page.get_by_role("button", name="Connect", exact=True).click()
+                        await native_page.wait_for_url(origin + "/connect/*")
+                        native_frame = native_page.frame_locator("iframe")
+                        await native_frame.locator("html.noVNC_connected").wait_for(timeout=30000)
+                        await native_frame.locator("#noVNC_transition").wait_for(state="hidden")
+                        await native_frame.locator("canvas").click()
+                        await native_page.keyboard.press("Enter")
+                        await wait_for(native_synthetic.saving.is_set)
+                        native_synthetic.publish.set()
+                        await wait_for(lambda: read_snapshot(settings.session_dir).generation == 9)
+                        await wait_for(lambda: replacement.account_allowed(settings.default_account))
+                        assert (native_config.root / "session-keeper" / "google.json").read_bytes() == consumed
+                        print(
+                            "PASS: abandoned reconnect refuses keeper; fresh verified generation restores access",
                             flush=True,
                         )
                         await page.screenshot(

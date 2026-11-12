@@ -62,18 +62,20 @@ RUN uv pip install --system --compile-bytecode --require-hashes -r /tmp/requirem
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE NOTICE THIRD_PARTY_NOTICES ./
 COPY src ./src
+COPY scripts/embed-build-identity.py /tmp/embed-build-identity.py
+ARG VERSION
+ARG VCS_REF
 # The managed Chromium policy (signin-window's) that keeps a sign-in window from local files, DevTools, downloads and
 # offers to save the password (every account's profile and snapshot lives in this container); the service opens no
 # window without it (src/photos_login/window.py).
-RUN uv pip install --system --compile-bytecode --no-deps . \
+RUN python /tmp/embed-build-identity.py "$VERSION" "$VCS_REF" \
+ && uv pip install --system --compile-bytecode --no-deps . \
  && python -m signin_window.browser install-policy \
  && rm -rf /app/src
 
 RUN python -c "from pathlib import Path; import patchright; p = Path(patchright.__file__).parent / 'driver' / 'node'; p.unlink(); p.symlink_to('/usr/local/bin/browser-node')" \
  && python -m patchright --version
 
-ARG VERSION=unknown
-ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG SOURCE_URL=unknown
 LABEL org.opencontainers.image.title="photos-mcp-login" \

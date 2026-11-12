@@ -407,6 +407,25 @@ class GoogleTransport:
 
     # -- public -------------------------------------------------------------------------
 
+    def bound_view(self) -> GoogleTransport:
+        """Fresh session and HTTP state for an already-fenced accepted binding.
+
+        SessionReader and HTTP contexts otherwise intentionally retain increasing
+        numeric generations. A replacement may reuse that number, so conditional
+        work must not inherit either cache from an older accepted publication.
+        """
+        return GoogleTransport(
+            SessionReader(self.reader.directory, missing_code=self.reader.missing_code),
+            self.state,
+            expected_email=self.expected_email,
+            sender_factory=self._sender_factory,
+            pacer=self.pacer,
+            image_pacer=self.image_pacer,
+            upload_pacer=self.upload_pacer,
+            clock=self._clock,
+            on_dead=self._on_dead,
+        )
+
     def rpc(self, payloads: Sequence[Payload]) -> list[RpcResult]:
         """One batchexecute POST for ``payloads``; raw data per envelope (None = RPC failed)."""
         payloads = list(payloads)
@@ -436,18 +455,31 @@ class GoogleTransport:
         rpcids = [p.rpcid for p in payloads]
         if not payloads or any(r not in WRITE_RPC_ALLOWLIST for r in rpcids):
             raise RuntimeError("RPC id not on the write allowlist")
-        with self.pacer.slot():
-            ctx = self._context()
-            self._ensure_globals(ctx)
-            response = self._post(ctx, payloads, retries=0, unknown="outcome_unknown")
-            if response.status in (400, 403):
-                self._event("stale_token", rpcids=",".join(rpcids), status=response.status)
-                ctx.client = None
+        attempted = False
+
+        def mark_attempted():
+            nonlocal attempted
+            attempted = True
+
+        try:
+            with self.pacer.slot():
+                ctx = self._context()
                 self._ensure_globals(ctx)
-                response = self._post(ctx, payloads, retries=0, unknown="outcome_unknown")
+                response = self._post(ctx, payloads, retries=0, unknown="outcome_unknown", on_send=mark_attempted)
                 if response.status in (400, 403):
-                    raise PhotosError("refused", log_detail=f"write HTTP {response.status} twice")
-            return self._parse_rpc(ctx, response, payloads)
+                    self._event("stale_token", rpcids=",".join(rpcids), status=response.status)
+                    ctx.client = None
+                    self._ensure_globals(ctx)
+                    response = self._post(ctx, payloads, retries=0, unknown="outcome_unknown", on_send=mark_attempted)
+                    if response.status in (400, 403):
+                        raise PhotosError("refused", log_detail=f"write HTTP {response.status} twice")
+                return self._parse_rpc(ctx, response, payloads)
+        except PhotosError as exc:
+            raise exc.at_mutation("write_attempted" if attempted else "before_write") from None
+        except Exception:
+            raise PhotosError("internal_error").at_mutation(
+                "write_attempted" if attempted else "before_write"
+            ) from None
 
     def upload_bytes(self, source: BinaryIO, *, size: int, name: str, sha1: str) -> str:
         """Send one file (``size`` bytes read from ``source``) with Google's resumable upload and return the upload
@@ -630,15 +662,22 @@ class GoogleTransport:
     # -- HTTP ---------------------------------------------------------------------------
 
     def _post(
-        self, ctx: _Context, payloads: Sequence[Payload], *, retries: int = MAX_RETRIES, unknown: str = "upstream_error"
+        self,
+        ctx: _Context,
+        payloads: Sequence[Payload],
+        *,
+        retries: int = MAX_RETRIES,
+        unknown: str = "upstream_error",
+        on_send: Callable[[], None] | None = None,
     ) -> HttpResponse:
         assert ctx.client is not None
         self.state.take("rpc", len(payloads))
         url, params, body = ctx.client.build_request(payloads)
         rpcids = ",".join(p.rpcid for p in payloads)
         response = self._send(
-            ctx, "POST", url, params=params, data=body, kind="rpc", label=rpcids, retries=retries, unknown=unknown
-        )
+            ctx, "POST", url, params=params, data=body, kind="rpc", label=rpcids,
+            retries=retries, unknown=unknown, on_send=on_send,
+        )  # fmt: skip
         if 300 <= response.status < 400:
             location = urljoin(url, response.headers.get("location", ""))
             code = _redirect_code(location)
@@ -728,6 +767,7 @@ class GoogleTransport:
         unknown: str = "upstream_error",
         extra: Headers = (),
         content_type: str | None = None,
+        on_send: Callable[[], None] | None = None,
     ) -> HttpResponse:
         """One logical request: host check, pacing, ≤``retries`` retries on 5xx/network, cookie merge. After the
         last attempt a 5xx or network failure is ``unknown`` (``outcome_unknown`` for a change)."""
@@ -746,6 +786,8 @@ class GoogleTransport:
             pacer.space()
             started = time.monotonic()
             try:
+                if on_send is not None:
+                    on_send()
                 response = ctx.sender.send(method, url, headers=headers, params=params, data=data, max_bytes=max_bytes)
             except BodyTooLarge:
                 pacer.done()

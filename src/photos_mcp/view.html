@@ -49,6 +49,7 @@
 </head>
 <body>
 <div id="root"><div class="status">Loading photos…</div></div>
+<!-- BUILD_IDENTITY -->
 <script>
 (() => {
   "use strict";
@@ -201,7 +202,7 @@
   }
 
   request("ui/initialize", {
-    appInfo: { name: "photos-view", version: "__VERSION__" },
+    appInfo: { name: "photos-view", version: __BUILD_VERSION_JSON__ },
     appCapabilities: { availableDisplayModes: ["inline"] },
     protocolVersion: "2026-01-26",
   }).then((r) => {

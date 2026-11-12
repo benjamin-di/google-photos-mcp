@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import sqlite3
 from dataclasses import replace
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -19,11 +20,12 @@ from starlette.routing import Route
 
 from . import accounts
 from .connect import TEXT, ConnectFlow
-from .connection_controls import ConnectionAdmission, publication_pending
+from .connection_controls import ConnectionAdmission, publication_pending, recovery_required
 from .connections_auth import BrowserLogin, ConnectionsConfig
 from .errors import PhotosError
 from .session import read_snapshot
 from .state import StateStore
+from .ui import renderer_options
 
 
 class Connections:
@@ -46,7 +48,13 @@ class Connections:
         )
         text = text.with_outcomes(failed=PageText().outcomes["failed"])
         self.flow = flow_factory(
-            settings, client, authorize=self.authorize, revision=self.revision, text=text, public_url=config.public_url
+            settings,
+            client,
+            authorize=self.authorize,
+            revision=self.revision,
+            text=text,
+            public_url=config.public_url,
+            controls=self.auth.store,
         )
 
     def revision(self, account):
@@ -64,7 +72,11 @@ class Connections:
             account = accounts.load(self.settings, person["account"])
         except PhotosError:
             return False
-        return self.account_allowed(account.id) and link.context.target == self.revision(account)
+        return (
+            self.auth.store.control(account.id)[1] != 2
+            and not publication_pending(self.auth.store, account.id)
+            and link.context.target == self.revision(account)
+        )
 
     def origin_ok(self, request):
         return self.auth.origin_ok(request)
@@ -86,6 +98,8 @@ class Connections:
             )
         elif state == "disconnecting":
             controls = self.form("disconnect", "Finish disconnecting", revision)
+        elif state == "recovery_required":
+            controls = "<p>Ask your administrator to repair this saved connection.</p>"
         elif state == "setup_required":
             controls = "<p>Ask your administrator to finish setting up this account.</p>"
         elif state != "disconnected":
@@ -124,10 +138,12 @@ class Connections:
         except PhotosError:
             return {"state": "setup_required", "label": "Account setup required"}
         _, suspended = self.auth.store.control(account.id)
-        if suspended:
+        if recovery_required(self.auth.store, account.id):
+            return {"state": "recovery_required", "label": "Local connection recovery required"}
+        if suspended == 2:
             return {
-                "state": "disconnecting" if suspended == 2 else "disconnected",
-                "label": "Access stopped — finish disconnecting" if suspended == 2 else "Disconnected",
+                "state": "disconnecting",
+                "label": "Access stopped — finish disconnecting",
                 "managed": not account.linked,
             }
         if publication_pending(self.auth.store, account.id):
@@ -148,6 +164,8 @@ class Connections:
                 "label": "Saving connection" if pending.state == "saving" else "Sign-in in progress",
                 "url": pending.url,
             }
+        if suspended:
+            return {"state": "disconnected", "label": "Disconnected", "managed": not account.linked}
         accounts.bind_from_keeper(self.settings, account)
         account = accounts.load(self.settings, account.id)
         try:
@@ -205,6 +223,8 @@ class Connections:
                 return await action(request)
         except TimeoutError:
             return self.notice("Another connection change is finishing. Retry shortly.", 409)
+        except sqlite3.OperationalError:
+            return self.notice("Connection operations are still finishing. Open the current connection and retry.", 409)
 
     async def start(self, request):
         return await self.mutate(request, self._start)
@@ -217,15 +237,19 @@ class Connections:
             account = accounts.load(self.settings, person["account"])
         except PhotosError:
             return self.notice("Account setup is required.", 409)
+        if recovery_required(self.auth.store, account.id):
+            return JSONResponse({"error": "recovery_required"}, status_code=503)
         if self.auth.store.control(account.id)[1] == 2:
             return self.notice("Confirm disconnect before starting another sign-in.", 409)
         if publication_pending(self.auth.store, account.id):
             return self.notice("The saved connection is being recovered. Try again shortly.", 409)
         if not self.auth.store.claim_owner(account.id, person["issuer"], person["sub"]):
             return Response(status_code=403)
-        self.auth.store.set_control(account.id, 0)
+        signed_in = self.status(person)["state"] == "connected"
+        # Starting verification grants no authority to use retained credentials.
+        self.auth.store.set_control(account.id, 1)
         try:
-            created = self.flow.create(account, signed_in=self.status(person)["state"] == "connected")
+            created = self.flow.create(account, signed_in=signed_in)
         except PhotosError as error:
             return self.notice(
                 "A new sign-in could not be opened. Try again later.",
@@ -251,6 +275,8 @@ class Connections:
             await asyncio.to_thread(self.drain, account.id)
             await asyncio.to_thread(self.client.forget, account.id)
         except Exception:
+            if recovery_required(self.auth.store, account.id):
+                return JSONResponse({"error": "recovery_required"}, status_code=503)
             return self.notice("Disconnect could not be confirmed. Open the current connection to retry.", 503)
         self.auth.store.set_control(account.id, 1)
         return RedirectResponse(self.path, status_code=303)
@@ -292,7 +318,14 @@ class Connections:
         return form
 
     def page(self, title, intro, body, *, refresh=False):
-        return connection_page(title, body, intro=intro, refresh=refresh, login_url=self.path + "login")
+        return connection_page(
+            title,
+            body,
+            intro=intro,
+            refresh=refresh,
+            login_url=self.path + "login",
+            **renderer_options(connection_page),
+        )
 
     def app(self):
         portal = Starlette(

@@ -21,6 +21,8 @@ from typing import Any
 
 from signin_window.sessions import refresh_due
 
+from photos_mcp.connection_controls import ConnectionAdmission, ConnectionSuspended, PublicationGuard
+from photos_mcp.errors import PhotosError
 from photos_mcp.session_export import ExportError, unpublish
 
 from . import window
@@ -53,8 +55,9 @@ class Keeper:
         refresher: Refresher | None = None,
         clock: Callable[[], float] = time.time,
         deployment=None,
+        controls=None,
     ) -> None:
-        self.deployment = deployment
+        self.deployment, self.controls = deployment, controls
         self.paths, self.browser_lock = paths, browser_lock
         self.every, self.retry = every, retry
         self.xvfb = xvfb
@@ -104,40 +107,57 @@ class Keeper:
 
     def _refresh_one(self, account: str) -> str | None:
         """One refresh; returns the keeper state written, or None when the browser was busy (next round)."""
-        data = self.paths.keeper(account) or {}
-        email = data.get("email")
-        if not isinstance(email, str):
-            return None
         if not self.browser_lock.acquire(timeout=LOCK_WAIT):
             return None
         try:
-            with self._lock:
-                self._requested.discard(account)
+            # Re-read after waiting: forget or a window may have replaced the state.
+            if self.controls is None:
+                return self._refresh_locked(account)
+            with ConnectionAdmission(self.controls).operation(account):
+                guard = PublicationGuard(self.controls, account)
+                epoch = guard.require_active()
+                return self._refresh_locked(account, guard=guard, epoch=epoch)
+        except ConnectionSuspended:
+            return None
+        except PhotosError as exc:
+            if exc.code == "connection_disconnected":
+                return None
+            raise
+        finally:
+            self.browser_lock.release()
+
+    def _refresh_locked(self, account, *, guard=None, epoch=None):
+        from contextlib import nullcontext
+
+        data = self.paths.keeper(account) or {}
+        email = data.get("email")
+        if data.get("state") not in (SIGNED_IN, ERROR) or not isinstance(email, str):
+            return None
+        with self._lock:
+            self._requested.discard(account)
+        try:
             result = self._refresher(
                 profile=self.paths.profile(account),
                 session_dir=self.paths.session(account),
                 email=email,
                 min_generation=self.paths.generation(account),
             )
+            state, error, generation = SIGNED_IN, None, int(result["generation"])
         except ExportError as exc:
             seen_before = data.get("state") == ERROR and data.get("error") in SIGNED_OUT_CODES
-            if exc.code in ENDED_AT_ONCE or (exc.code in SIGNED_OUT_CODES and seen_before):
-                unpublish(self.paths.session(account))
-                self.paths.record(account, SIGNED_OUT, error=exc.code, clock=self._clock)
-                log.warning("keeper: account %s is signed out (%s); its snapshot is withdrawn", account, exc.code)
-                return SIGNED_OUT
-            self.paths.record(account, ERROR, error=exc.code, clock=self._clock)
-            log.warning("keeper: account %s not refreshed (%s)", account, exc.code)
-            return ERROR
-        except Exception as exc:  # the loop must survive anything
-            self.paths.record(account, ERROR, error="failed", clock=self._clock)
+            state = SIGNED_OUT if exc.code in ENDED_AT_ONCE or (exc.code in SIGNED_OUT_CODES and seen_before) else ERROR
+            error, generation = exc.code, None
+        except Exception as exc:
+            state, error, generation = ERROR, "failed", None
             log.error("keeper: account %s crashed (%s)", account, type(exc).__name__)
-            return ERROR
-        finally:
-            self.browser_lock.release()
-        self.paths.record(account, SIGNED_IN, generation=int(result["generation"]), clock=self._clock)
-        log.info("keeper: account %s refreshed (generation %s)", account, result["generation"])
-        return SIGNED_IN
+        # Keep success, errors and withdrawal inside the browser lock. A disconnect
+        # may already have closed admission while it waits for this refresh to drain.
+        with guard.status(epoch) if guard else nullcontext():
+            if state == SIGNED_OUT:
+                unpublish(self.paths.session(account))
+            self.paths.record(account, state, generation=generation, error=error, clock=self._clock)
+        log.info("keeper: account %s checked (%s)", account, state)
+        return state
 
     def _refresh(self, *, profile, session_dir, email, min_generation) -> dict[str, Any]:  # type: ignore[no-untyped-def]
         width, height = window.LAYOUTS["desktop"]
