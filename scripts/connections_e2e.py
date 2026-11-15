@@ -455,10 +455,7 @@ async def run():
                         native_frame = native_page.frame_locator("iframe")
                         await native_frame.locator("html.noVNC_connected").wait_for(timeout=20000)
                         await native_frame.locator("#noVNC_transition").wait_for(state="hidden")
-                        if await native_frame.locator("#noVNC_control_bar").evaluate(
-                            "element => element.classList.contains('noVNC_open')"
-                        ):
-                            await native_frame.locator("#noVNC_control_bar_handle").click()
+                        await native_frame.get_by_role("button", name="Keyboard", exact=True).wait_for(state="visible")
                         if os.environ.get("CONNECTIONS_NATIVE_SCREENSHOT"):
                             await native_page.screenshot(path=os.environ["CONNECTIONS_NATIVE_SCREENSHOT"])
                         await native_frame.locator("canvas").click()

@@ -464,7 +464,7 @@ server = [
 
 [[package]]
 name = "google-photos-mcp"
-version = "0.14.1"
+version = "0.14.4"
 source = { editable = "." }
 dependencies = [
     { name = "curl-cffi" },
@@ -497,7 +497,7 @@ requires-dist = [
     { name = "patchright", marker = "extra == 'login'", specifier = "==1.61.2" },
     { name = "pillow", specifier = ">=12.0" },
     { name = "playwright", marker = "extra == 'session'", specifier = ">=1.55" },
-    { name = "signin-window", extras = ["automation", "oidc"], specifier = ">=0.8.1,<0.9" },
+    { name = "signin-window", extras = ["automation", "oidc"], specifier = ">=0.8.4,<0.9" },
     { name = "tzdata", specifier = ">=2025.2" },
 ]
 provides-extras = ["session", "login"]
@@ -1528,16 +1528,16 @@ wheels = [
 
 [[package]]
 name = "signin-window"
-version = "0.8.1"
+version = "0.8.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "starlette" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9c/20/6fbb25685900b0f74d0ff0f23dc1585f7257370979faae64d026d6935010/signin_window-0.8.1.tar.gz", hash = "sha256:ee236e5eed44ee30778235f5261874c764d3d1c57c21cdb731c5353bf169306e", size = 319709, upload-time = "2026-11-12T00:03:08.521Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/f2/dbabc17f309cdd762c08e81a99bca36311d57898a4d56bef532539c1d823/signin_window-0.8.4.tar.gz", hash = "sha256:06002fb632c42dea1b61e2e30a8bed1c4ff7dc32cf12b55964c5ea4739c1442b", size = 334697, upload-time = "2026-11-15T05:32:56.132Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b9/c4/df0113baba65002b2f1aa39406e2f05bf340be07840ba8655e8ffe8bcd6b/signin_window-0.8.1-py3-none-any.whl", hash = "sha256:2e49658be745fb5e2bc2a4ae7ca3897634770f0871dc4a56dd2a42629aed3a47", size = 153148, upload-time = "2026-11-12T00:03:07.247Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/af/41889e35fe64dbd9f406b84aa6e9711f49b200c07b66bacd9f273d89f557/signin_window-0.8.4-py3-none-any.whl", hash = "sha256:2aca80aeaf757530e6be299543b47c817c76f0b2c303d7dfc1e14f1bb0d920f7", size = 158858, upload-time = "2026-11-15T05:32:54.602Z" },
 ]
 
 [package.optional-dependencies]

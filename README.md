@@ -573,7 +573,10 @@ and their formats stay valid. See [Connections setup and recovery](docs/CONNECTI
   Ctrl+V (Cmd+V) types the clipboard's text into the window (a small add-on to noVNC's viewer
   from [signin-window](https://github.com/benjamin-di/signin-window), the library the sign-in
   window and its links are built on; up to 1000 characters the window's keyboard has, which
-  covers ASCII); on a phone, noVNC's keyboard button opens the phone's keyboard.
+  covers ASCII). On a phone, select the field on the remote page, then tap **Keyboard**
+  to type or **Paste** to insert copied text. **Done** dismisses the keyboard without
+  submitting; use the page's own button to continue. **Zoom** enlarges the page, and
+  dragging with one finger pans the view.
 - **Once Google Photos shows a signed-in account**, the window checks that this account may
   use it (its bound address, or any address no other account here serves), then writes the
   snapshot from the same browser, as `photos-mcp-session browser export` does (it loads the

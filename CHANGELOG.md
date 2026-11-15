@@ -3,6 +3,40 @@
 All notable changes are recorded here. This project follows
 Semantic Versioning.
 
+## [0.14.4] - 2026-11-15
+
+### Fixed
+
+- Use the compact mobile sign-in viewer with native keyboard input, Paste and Zoom (2a291ea)
+- Preserve editor focus while allowing touch controls to activate on WebKit (2a291ea)
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.3; saved sessions, connection controls and storage formats are unchanged.
+
+## [0.14.3] - 2026-11-14
+
+### Fixed
+
+- Require signin-window 0.8.2 for package installations, so an existing 0.8.1 installation cannot miss the mobile remote-input fix.
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.2; saved sessions, account controls and storage formats are unchanged.
+
+## [0.14.2] - 2026-11-14
+
+### Fixed
+
+- Use signin-window 0.8.2 so phone users can open a keyboard in remote sign-in and edits remain bound to their original viewer.
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.1; saved sessions, connection controls and account state are unchanged.
+
 ## [0.14.1] - 2026-11-12
 
 _Publishes the changes since the last public release, which the public mirror did not receive; the package is unchanged from 0.14.0._
@@ -28,7 +62,7 @@ _Publishes the changes since the last public release, which the public mirror di
 
 ### Upgrade
 
-- Action required: none.
+- Action required: give the further-account login service the existing Connections controls directory through `PHOTOS_CONNECTIONS_CONTROLS_DIR` (writable, the same directory as maintenance) with `CONNECTIONS_REQUIRE_CONTROLS=1`; without it the login service refuses to start (docs/CONNECTIONS.md).
 - Rollback: compatible with 0.13.1; preserve current credentials, connection controls and owner bindings.
 
 ## [0.13.1] - 2026-11-03
