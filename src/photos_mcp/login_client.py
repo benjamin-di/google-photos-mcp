@@ -67,8 +67,14 @@ class RoutedLoginClient:
         backend, identifier = self._route(window_id)
         return None if backend is self.default else backend.result(identifier)
 
-    def close(self, window_id):
+    def close(self, window_id, *, cancel_only=False):
+        import inspect
+
         backend, identifier = self._route(window_id)
+        if cancel_only:
+            if "cancel_only" in inspect.signature(backend.close).parameters:
+                backend.close(identifier, cancel_only=True)
+            return
         backend.close(identifier)
 
     def static(self, path, window_id=None):

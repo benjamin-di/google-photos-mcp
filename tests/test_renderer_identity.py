@@ -175,7 +175,7 @@ def test_standalone_flow_forwards_host_identity_and_preserves_supplied_text(syst
         assert page.status_code == 200
         assert_identity(page.text)
         assert '"autoStart": false' in page.text
-        assert "Device passkeys do not work here" in page.text if not custom else "Synthetic instructions" in page.text
+        assert "device passkeys aren" in page.text.lower() if not custom else "Synthetic instructions" in page.text
         assert "Synthetic failure" in page.text if custom else "Nothing was connected" in page.text
         assert "fake-other-service" not in page.text
         denied = browser.post(path(link["url"]) + "/start", headers={"origin": "https://example.com"})

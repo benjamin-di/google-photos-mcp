@@ -719,3 +719,37 @@ def test_rejected_binding_forgets_after_releasing_authority_transaction(system):
     assert portal.flow._bind(attempt, "claimed@example.com") == "in_use"
     assert forgotten == ["first"]
     assert portal.auth.store.control("first")[1] == 1
+
+
+def test_start_new_sign_in_shows_view_layout_preserves_window_on_429_and_fences_stuck_teardown(system):
+    portal, provider, backend, client, _ = system
+    assert sign_in(portal, provider, client).status_code == 303
+    origin = {"origin": "https://example.com"}
+    first_path = start(client)
+    assert client.post(first_path + "/start", json={"layout": "phone"}, headers=origin).status_code == 200
+    page = client.get("/connections/").text
+    assert "Sign-in in progress (mobile view)" in page
+    assert "Continue sign-in" in page
+    assert "Start new sign-in" in page
+
+    # Exhaust rate limit: 429 preserves active window and control epoch.
+    before_control = portal.auth.store.control("first")
+    portal.flow.relay.links_per_hour = 1
+    assert owner_post(client, "/connections/start", headers=origin).status_code == 429
+    assert portal.auth.store.control("first") == before_control
+    assert client.get(first_path + "/state").json()["state"] in ("starting", "waiting")
+    portal.flow.relay.links_per_hour = 6
+
+    # Stuck backend teardown returns 409, keeps control, and closes replacement.
+    orig_close = backend.close
+    backend.close = lambda login_id, *, cancel_only=False: backend.closed.append("stuck")
+    assert owner_post(client, "/connections/start", headers=origin).status_code == 409
+    assert portal.auth.store.control("first") == before_control
+    assert owner_post(client, "/connections/start", headers=origin).status_code == 409
+    backend.close = orig_close
+    rec_path = start(client)
+    assert client.post(rec_path + "/start", headers=origin).status_code == 200
+    active_link = portal.flow.relay.links("first")[-1]
+    active_link.state = "saving"
+    assert owner_post(client, "/connections/start", headers=origin).status_code == 409
+    assert "Saving connection" in client.get("/connections/").text

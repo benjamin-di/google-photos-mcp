@@ -64,11 +64,11 @@ def test_tool_surface_and_annotations(service):
         assert tool.annotations.open_world_hint is (tool.name != "photos_status"), tool.name
 
 
-def test_instructions_cover_flow_and_every_error_code():
+def test_instructions_cover_flow_and_stay_compact():
     assert "photos_search -> photos_contact_sheet -> photos_view" in INSTRUCTIONS
-    assert "read" in INSTRUCTIONS.lower()
-    for code in NEXT_STEP:
-        assert code in INSTRUCTIONS
+    assert "next_step" in INSTRUCTIONS
+    assert "send_file" not in INSTRUCTIONS
+    assert len(INSTRUCTIONS) < 2000
 
 
 def test_search_returns_compact_json(service):

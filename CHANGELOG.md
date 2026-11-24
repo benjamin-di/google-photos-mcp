@@ -3,6 +3,53 @@
 All notable changes are recorded here. This project follows
 Semantic Versioning.
 
+## [0.14.8] - 2026-11-24
+
+### Changed
+
+- Exclude internal image checks from the public source archive.
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.7 and 0.14.6; runtime code, state, and configuration are unchanged from 0.14.7.
+
+## [0.14.7] - 2026-11-24
+
+### Changed
+
+- Upgrade `signin-window` from 0.8.4 to 0.10.0 for mobile/desktop remote viewer improvements (scrollable noVNC container, Restart button, passkey notice, keyboard/paste/zoom ergonomics, and non-blocking sign-in completion handoff).
+- Forward `cancel_only` through `RoutedLoginClient.close()` and `force` through `DeploymentRelay._retire()` while retaining deployment holds across pending `closing` teardowns.
+- Show the active view layout (`mobile view` / `desktop view`) on `/connections/` and offer `Start new sign-in` alongside `Continue sign-in`, with fenced replacement teardown, saving-state protection, and `429` active-window preservation.
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.6; `signin-window` 0.10.0 adds `revocations` and `session_families` tables to the `connections/browser.sqlite3` store while preserving `sessions`, `controls`, `owners`, and saved snapshots (`make rollback-check`).
+
+## [0.14.6] - 2026-11-23
+
+### Changed
+
+- Publish the 0.14.5 changes (trimmed MCP server instructions and global `PHOTOS_MCP_DEPS_IMAGE` Dockerfile build arg) against the current `fleet-ci` library after the mid-release library update superseded tag `v0.14.5`.
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.4; saved sessions, connection controls and storage formats are unchanged.
+
+## [0.14.5] - 2026-11-23
+
+### Changed
+
+- Trim MCP server instructions to remove redundant tool/parameter re-listings, the raw error-table dump, and unprefixed cross-service references.
+- Migrate CI checks and image promotion to native Jenkins `fleetPipeline` with `mainCandidate`.
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.14.4; saved sessions, connection controls and storage formats are unchanged.
+
 ## [0.14.4] - 2026-11-15
 
 ### Fixed

@@ -18,7 +18,10 @@ policy; the attempt id alone grants no access.
 
 from __future__ import annotations
 
+import collections
 import logging
+import secrets
+import threading
 import time
 from dataclasses import replace
 from typing import Any
@@ -39,11 +42,12 @@ log = logging.getLogger(__name__)
 TEXT = PageText(
     service="Google",
     title="Connect your Google Photos",
+    notice="Use your password or verification code — device passkeys aren't available in this remote window.",
     help_html=(
         "Sign in to Google in the remote browser below, using your password and any verification Google requests. "
-        "Device passkeys do not work here. Paste with Ctrl+V or Cmd+V. This application keeps the signed-in session; "
-        "assistant permissions are managed separately. You can also sign out this device in your Google Account's "
-        "Security settings."
+        "On a phone or tablet, tap Paste, Keyboard, or Zoom in the toolbar above; on a desktop, paste with Ctrl+V or "
+        "Cmd+V. This application keeps the signed-in session; assistant permissions are managed separately. You can "
+        "also sign out this device in your Google Account's Security settings."
     ),
     intro_html=(
         "Connect Google Photos for <b>{label}</b>. Sign in to the Google account you want this application to use."
@@ -79,6 +83,91 @@ TEXT = PageText(
 )
 
 
+class ReservedRelay(Relay):
+    """Relay with binding pre-teardown slot reservation so 429 never cancels a live window."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lock = threading.RLock()
+        self._reserved_slots = 0
+
+    def reserve_slot(self, key: str) -> bool:
+        now = self._clock()
+        with self._lock:
+            made = self._made.setdefault(key, collections.deque())
+            while made and now - made[0] > 3600:
+                made.popleft()
+            if len(made) >= self.links_per_hour:
+                return False
+            self._expire(now)
+            if len(self._retired) + self._reserved_slots >= self.max_links:
+                return False
+            self._reserved_slots += 1
+            return True
+
+    def release_slot(self) -> None:
+        with self._lock:
+            if self._reserved_slots > 0:
+                self._reserved_slots -= 1
+
+    def create(
+        self,
+        key: str,
+        *,
+        params: dict[str, Any] | None = None,
+        label: str | None = None,
+        context: AttemptContext | None = None,
+        reserved: bool = False,
+    ) -> Link:
+        if self._authorize is not None and (context is None or not context.owner):
+            raise ValueError("authenticated links require a host-assigned owner")
+        to_retire: list[Link] = []
+        with self._lock:
+            if reserved and self._reserved_slots > 0:
+                self._reserved_slots -= 1
+            now = self._clock()
+            made = self._made.setdefault(key, collections.deque())
+            while made and now - made[0] > 3600:
+                made.popleft()
+            if len(made) >= self.links_per_hour:
+                raise LinkLimited(key)
+            self._expire(now)
+            if not reserved and len(self._retired) + self._reserved_slots >= self.max_links:
+                raise LinkLimited(key)
+            made.append(now)
+            for old in [item for item in self._links.values() if item.key == key]:
+                self._links.pop(old.id, None)
+                old.closed = True
+                old.view_token = None
+                if old.window_id is not None:
+                    self._track_retired_locked(old)
+                    if old.state != "saving":
+                        to_retire.append(old)
+            while len(self._links) >= self.max_links:
+                oldest = self._links.pop(min(self._links.values(), key=lambda item: item.created).id)
+                oldest.closed = True
+                oldest.view_token = None
+                if oldest.window_id is not None:
+                    self._track_retired_locked(oldest)
+                    if oldest.state != "saving":
+                        to_retire.append(oldest)
+            link_id = secrets.token_urlsafe(24)
+            link = Link(
+                link_id,
+                key,
+                now,
+                now + self.link_ttl,
+                f"{self.public_url}/{link_id}",
+                dict(params or {}),
+                key if label is None else label,
+            )
+            link.context = context
+            self._links[link.id] = link
+        for old in to_retire:
+            threading.Thread(target=self._retire, args=(old,), daemon=True).start()
+        return link
+
+
 class ConnectFlow:
     def __init__(
         self,
@@ -104,7 +193,7 @@ class ConnectFlow:
 
             relay = functools.partial(DeploymentRelay, deployment=deployment)
         else:
-            relay = Relay
+            relay = ReservedRelay
         text = text or TEXT
         options = renderer_options(PageText)
         if options:
@@ -113,13 +202,32 @@ class ConnectFlow:
                            clock=clock, authorize=authorize,
                            before_start=self._before_start, on_ended=self._ended)  # fmt: skip
 
-    def create(self, account: accounts.Account | None, *, signed_in: bool) -> dict[str, Any]:
+    def create(
+        self,
+        account: accounts.Account | None,
+        *,
+        signed_in: bool,
+        reserved: bool = False,
+        ticket: Any = None,
+    ) -> dict[str, Any]:
         """A sign-in link for ``account`` (the caller's): replaces any open link of that account."""
         if account is None:
+            if reserved and hasattr(self.relay, "release_slot"):
+                self.relay.release_slot()
             raise PhotosError("connect_unavailable", log_detail="account missing")
         try:
+            target = self.revision(account)
+        except BaseException:
+            if reserved and hasattr(self.relay, "release_slot"):
+                self.relay.release_slot()
+            raise
+        try:
+            extra = {"ticket": ticket} if ticket is not None else {}
             link = self.relay.create(
-                account.id, context=AttemptContext(owner=account.id, target=self.revision(account))
+                account.id,
+                context=AttemptContext(owner=account.id, target=target),
+                reserved=reserved,
+                **extra,
             )
         except LinkLimited:
             raise PhotosError("connect_limited", log_detail="link rate") from None

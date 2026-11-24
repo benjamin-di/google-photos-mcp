@@ -312,7 +312,10 @@ def test_cancelled_window_retains_a_runner_queued_in_the_executor(gate):
             windows._cancel(window)
             await asyncio.sleep(0)
             window.task.cancel()
-            await window.task
+            await asyncio.sleep(0)
+            window.task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await window.task
             await asyncio.sleep(0)
             assert window.task.done() and not runner_started.is_set()
             with pytest.raises(Busy):
@@ -325,6 +328,7 @@ def test_cancelled_window_retains_a_runner_queued_in_the_executor(gate):
             with pytest.raises(Busy):
                 gate.drain(operation, 0)
             exit_runner.set()
+            await windows.close_all()
         finally:
             unblock_executor.set()
             exit_runner.set()

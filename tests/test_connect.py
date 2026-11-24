@@ -50,9 +50,11 @@ class FakeLogin:
     def state(self, login_id: str) -> dict:
         return self.states.get(login_id, {"state": "unknown"})
 
-    def close(self, login_id: str) -> None:
+    def close(self, login_id: str, *, cancel_only: bool = False) -> None:
         self.closed.append(login_id)
-        self.states.pop(login_id, None)
+        state = (self.states.get(login_id) or {}).get("state")
+        if not cancel_only or state in ("starting", "waiting"):
+            self.states.pop(login_id, None)
 
     def refresh(self, account: str) -> None:
         self.refreshed.append(account)
@@ -287,7 +289,12 @@ def test_a_sign_in_binds_the_links_account_to_the_address_it_proved(http, login,
     # The login service is told which address it may accept: any but the ones other accounts serve.
     assert login.started == [{"account": "second", "layout": "phone", "email": None, "taken": ["owner@example.com"]}]
     wait_for(lambda: http.get(path + "/state").json()["state"] == "waiting")
-    assert http.get(path + "/state").json() == {"state": "waiting", "host": "accounts.google.com"}
+    assert http.get(path + "/state").json() == {
+        "state": "waiting",
+        "host": "accounts.google.com",
+        "layout": "phone",
+        "can_restart": True,
+    }
     login.end("login-00000000000", "saving")
     wait_for(lambda: http.get(path + "/state").json()["state"] == "saving")
     publish(settings, "second", OTHER)  # the login service writes the snapshot itself

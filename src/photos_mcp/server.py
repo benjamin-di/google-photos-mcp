@@ -56,7 +56,7 @@ from .connection_controls import ConnectionAdmission, publication_pending
 from .connections import Connections
 from .connections_auth import BrowserStore, ConnectionsConfig
 from .downloads import DownloadLinks
-from .errors import NEXT_STEP, PhotosError, invalid
+from .errors import PhotosError, invalid
 from .login_client import LoginClient, LoginUnavailable, RoutedLoginClient
 from .session import SessionReader, read_snapshot
 from .state import StateStore
@@ -122,87 +122,25 @@ class Pick(BaseModel):
     note: Annotated[str | None, Field(max_length=200, description="Your short caption for this photo")] = None
 
 
-_ERRORS = "\n".join(f"- {code}: {text}" for code, text in NEXT_STEP.items())
-
-INSTRUCTIONS = f"""\
-Google Photos for the calling person's own account, through the same private web API
-photos.google.com uses: find and look at photos and videos, add photos and videos, move them to
-the trash and back, and organise albums. Nothing here empties the trash, archives or edits
-photos, or changes Google Photos sharing settings.
+INSTRUCTIONS = """\
+Google Photos for the calling person's own account: search, view, upload, move to/from trash, and
+organise albums. Nothing here empties the trash, archives or edits photos, or changes sharing.
 
 Flow: photos_search -> photos_contact_sheet -> photos_view, then photos_show for the person.
-1. photos_search(query) uses Google's own search: people (a name the library has
-   labelled), places ("Paris"), things ("dog", "receipt", "whiteboard"), text in images,
-   dates ("July 2023", "2019"), and combinations ("beach 2022"). photos_list walks the library (newest
-   first by taken date; from_date/to_date for an exact range), the archive, one album
-   (photos_albums lists albums), the favourites, or what was uploaded most recently (recently_added).
-   Both take media=photos|videos. photos_on_this_day gives this day in earlier years.
-2. photos_contact_sheet(ids) shows up to 24 candidates as one numbered grid; the legend
-   maps each number to its id and date. Use it to pick, instead of viewing one by one.
-3. photos_view(ids, max_px) returns up to 4 images (videos: the poster frame).
-   photos_get(ids) gives details: place, coordinates, camera, albums, description, source.
-4. Presenting: whenever you show the person photos you picked or found, call photos_show with
-   them and a short note each: claude.ai and ChatGPT draw a gallery with links to Google Photos.
-   Do it without being asked, then add only what the gallery does not show.
-
-Items have one shape everywhere (search, list, album, get), every key present, null when
-unknown: {{id, url, type, taken_at, tz_known, filename, description, place, favourite,
-archived}}. url opens the item on photos.google.com (the person's own browser signs in):
-link with it. taken_at is local time with its UTC offset when tz_known is true; otherwise
-the same instant in UTC ("Z") and the local time is unknown. Search results carry no
-place (Google's search response has none): pass details=true (adds place, lat, lon and
-camera; limit up to 20) or use photos_get. photos_get adds uploaded_at (UTC), lat/lon,
-camera, width/height, size_bytes, duration_s, albums, source (how it reached the library:
-mobile, web, shared, partnerShared, drive, pc, gmail; android, ios) and original_quality.
-
-Albums: photos_album_create(title, ids) makes an album (with up to 50 items);
-photos_album_add(album_id, ids) adds up to 50 items (ids from search or list); photos_album_remove
-takes them out again (they stay in the library; its ids are the ones photos_list(source=album)
-gives for that album). Each change is read back from the album (added / removed counts) and
-counts against a daily write budget (photos_status: budgets).
-
-Adding photos and videos: photos_upload_link(album_id) gives a one-time page where the person
-picks photos and videos from their phone or computer; each goes straight into their library (and
-the album). Give them the url. The same url takes one file per PUT from a client that has the file
-on disk, such as an image you made in a code sandbox (put_example). photos_upload(url=...) adds
-the photo or video at a public https link; photos_upload(data=...) one you have as base64 (up to
-10 MiB). A file the library already holds is not added twice (already_in_library). Each upload
-counts against the write budget; photos_list(source=recently_added) shows what arrived.
-
-Deleting: photos_delete(ids) moves up to 50 photos or videos (ids from search or list) to the
-trash, where Google keeps them 60 days; photos_restore(ids) brings them back, and
-photos_list(source=trash) lists the trash. photos_album_delete(album_id) deletes one of the
-person's own albums (its photos stay in the library; the album cannot be brought back).
-photos_delete, photos_album_delete and photos_album_remove take things away: ask the person
-before calling them, showing exactly what goes (photos_show for photos, the album's title and
-count for an album); their client also asks them to approve each call.
-
-Images for viewing: at most 1568 px on the longest edge. When photos_download is offered,
-it makes one-time JPEG download links for transferring photos to another tool: for example,
-pass each returned url to WhatsApp send_file(source_url=..., recipient=...). Do not open or
-preview the link first: one GET consumes it. Links expire in 10 minutes. Copies default to
-2048 px (up to 4096), strip original metadata and are not original files. Videos are refused,
-never replaced by a poster. Original files (originals) are not available here.
-photos_view's width/height describe the returned JPEG, not the original (photos_get has
-the original's dimensions).
-
-Paging: pass next_cursor back as cursor with the same query/source/album. A cursor
-lives 1 h. coverage.pagination_complete says whether you saw everything; if
-coverage.dedupe_required is set, the cursor was recovered and items may repeat.
-Shared and partner libraries are not covered. Archived items: photos_list(source=library)
-leaves them out; search, albums and source=archive include them (coverage.archive_included);
-each item's archived flag says which are archived (null where Google does not say).
-
-Requests to Google are paced and budgeted per day: keep limits modest, avoid loops.
-photos_status shows the session, budgets, breaker and last error without calling Google.
-photos_canary is for monitoring: one real check per 55 min (5 min after a transient
-failure, or sooner when a new session generation appears), cached in between.
-
-Signing in: when a tool says not_signed_in, photos_connect (where this server offers it) gives a
-one-time link where the person signs in to Google themselves; give them the link.
-
-Errors come as {{"error": {{"code", "next_step", "retryable"}}}}:
-{_ERRORS}
+- Always call photos_show with a short note per photo whenever presenting picks or results to the
+  person (claude.ai and ChatGPT render a gallery), without waiting to be asked.
+- Items share one shape ({id, url, type, taken_at, tz_known, filename, description, place,
+  favourite, archived}); link with url. taken_at has a local UTC offset when tz_known is true,
+  else UTC ("Z"). Search omits place unless details=true or photos_get is called.
+- Viewing caps at 1568 px; width/height reflect the returned JPEG, not originals (originals are
+  unavailable; photos_get has original dimensions). photos_download links expire in 10 min and are
+  consumed on first GET (do not preview them first; videos are refused).
+- Paging cursors live 1 h (same query/source/album). Shared/partner libraries are not covered.
+  photos_list(source=library) excludes archived items; search/albums/archive include them.
+- Destructive actions (photos_delete, photos_album_delete, photos_album_remove): confirm with the
+  person first, showing exactly what goes (photos_show for photos; title and count for albums).
+- Requests are paced and daily-budgeted: keep limits modest and avoid loops. photos_canary is for
+  monitoring only. Errors return {"error": {"code", "next_step", "retryable"}}; follow next_step.
 """
 
 

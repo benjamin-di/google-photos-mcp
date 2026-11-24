@@ -1,8 +1,22 @@
 # syntax=docker/dockerfile:1.7
-# photos-mcp: source on top of photos-mcp-deps (Dockerfile.deps). The release workflow builds
-# both stages as one chain; locally:
-#   docker build -f Dockerfile.deps -t photos-mcp-deps . && docker build --build-arg VERSION=0.13.1 --build-arg VCS_REF="$(git rev-parse HEAD)" -t photos-mcp .
-ARG PHOTOS_MCP_DEPS_IMAGE=photos-mcp-deps:latest
+# photos-mcp: source on top of photos-mcp-deps (inlined as the default `deps` stage, or passed via
+# PHOTOS_MCP_DEPS_IMAGE when built from Dockerfile.deps).
+ARG PHOTOS_MCP_DEPS_IMAGE=deps
+FROM ghcr.io/astral-sh/uv:0.9.26@sha256:9a23023be68b2ed09750ae636228e903a54a05ea56ed03a934d00fe9fbeded4b AS uv
+
+FROM python:3.12.14-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f AS deps
+
+COPY runtime-installer.py /tmp/runtime-installer.py
+RUN python /tmp/runtime-installer.py && rm /tmp/runtime-installer.py
+
+COPY --from=uv /uv /usr/local/bin/uv
+
+COPY requirements-runtime.lock /tmp/requirements-runtime.lock
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --compile-bytecode --require-hashes -r /tmp/requirements-runtime.lock \
+    && rm -f /tmp/requirements-runtime.lock \
+    && python -c 'import curl_cffi, PIL, fastmcp, tzdata; assert fastmcp.__version__ == "4.0.10"'
+
 FROM ${PHOTOS_MCP_DEPS_IMAGE}
 
 WORKDIR /app

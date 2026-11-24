@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "version": "0.14.4",
+  "version": "0.14.8",
   "state": {
     "change": "none",
-    "from": null,
-    "to": null
+    "from": "browser-sessions sqlite v2 with revocations and session_families (signin-window 0.10.0)",
+    "to": "browser-sessions sqlite v2 with revocations and session_families (signin-window 0.10.0)"
   },
   "configuration": {
     "change": "none",

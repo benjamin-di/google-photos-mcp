@@ -374,6 +374,9 @@ def guarded_windows(windows, gate):
         # Retain those handles until exit has actually been confirmed.
         with contextlib.suppress(Exception):
             work.display_cleaned = all(proc.poll() is not None for proc in [*procs, *window.procs])
+        if work.display_cleaned:
+            with contextlib.suppress(RuntimeError):  # Closed loop: retain unknown work.
+                work.loop.call_soon_threadsafe(work.settle)
         return result
 
     async def start(*args, **kwargs):
@@ -389,7 +392,10 @@ def guarded_windows(windows, gate):
             token = current.set(work)
             try:
                 window = await original(*args, **kwargs)
-                window.task.add_done_callback(work.task_done)
+                if window.task is None:
+                    work.task_done()
+                else:
+                    window.task.add_done_callback(work.task_done)
                 return window
             except BaseException as exc:
                 # Validation/slot refusal never dispatched a display. Cancellation
@@ -440,10 +446,10 @@ def main():
 # Relay's pinned implementation follows windows in a background thread and
 # retires expired links in separate threads. HTTP request counts alone cannot
 # cover the final owner/account binding. Keep its whole attempt under a lease.
-from signin_window.relay import Relay  # noqa: E402
+from .connect import ReservedRelay  # noqa: E402
 
 
-class DeploymentRelay(Relay):
+class DeploymentRelay(ReservedRelay):
     def __init__(self, *args, deployment, **kwargs):
         import threading
 
@@ -453,20 +459,33 @@ class DeploymentRelay(Relay):
         self._deployment_tickets = {}
 
     def _deployment_done(self, link):
-        if link.window_id is None and (link.closed or link.state == "connected"):
-            ticket = self._deployment_tickets.pop(link.id, None)
-            if ticket is not None:
-                ticket.close()
-
-    def create(self, *args, **kwargs):
-        ticket = self.deployment.ticket()
         with self._deployment_mutex:
+            if link.window_id is None and not link.closing and (link.closed or link.state == "connected"):
+                ticket = self._deployment_tickets.pop(link.id, None)
+                if ticket is not None:
+                    ticket.close()
+
+    def create(self, *args, ticket=None, reserved: bool = False, **kwargs):
+        owns_ticket = ticket is None
+        try:
+            if ticket is None:
+                ticket = self.deployment.ticket()
+        except BaseException:
+            if reserved:
+                self.release_slot()
+            raise
+        with self._deployment_mutex:
+            before = list(self._links.values())
             try:
-                link = super().create(*args, **kwargs)
+                link = super().create(*args, reserved=reserved, **kwargs)
                 self._deployment_tickets[link.id] = ticket
+                for old in before:
+                    if old.id != link.id:
+                        self._deployment_done(old)
                 return link
             except BaseException:
-                ticket.close()
+                if owns_ticket:
+                    ticket.close()
                 raise
 
     def start(self, link, layout):
@@ -481,14 +500,15 @@ class DeploymentRelay(Relay):
             super().advance(link)
             self._deployment_done(link)
 
-    def cancel(self, link):
+    def cancel(self, link, *, for_restart: bool = False):
         with self._deployment_mutex:
-            super().cancel(link)
+            result = super().cancel(link, for_restart=for_restart)
             self._deployment_done(link)
+            return result
 
-    def _retire(self, link):
+    def _retire(self, link, *, force=False):
         with self._deployment_mutex:
-            super()._retire(link)
+            super()._retire(link, force=force)
             self._deployment_done(link)
 
 
